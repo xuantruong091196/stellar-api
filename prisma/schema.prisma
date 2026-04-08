@@ -1,0 +1,248 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────
+
+enum OrderStatus {
+  PENDING
+  ESCROW_LOCKED
+  SENT_TO_PROVIDER
+  IN_PRODUCTION
+  SHIPPED
+  DELIVERED
+  ESCROW_RELEASED
+  DISPUTED
+  CANCELLED
+  REFUNDED
+}
+
+enum EscrowStatus {
+  LOCKING
+  LOCKED
+  RELEASING
+  RELEASED
+  DISPUTED
+  REFUNDED
+  EXPIRED
+}
+
+// ─── Models ──────────────────────────────────────────────────────────
+
+model Store {
+  id             String   @id @default(uuid())
+  shopifyDomain  String   @unique
+  shopifyToken   String
+  name           String
+  email          String
+  plan           String   @default("free")
+  stellarAddress String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  designs        Design[]
+  orders         Order[]
+  escrows        Escrow[]
+  storeProviders StoreProvider[]
+  webhookLogs    WebhookLog[]
+}
+
+model Provider {
+  id             String   @id @default(uuid())
+  name           String
+  country        String
+  contactEmail   String
+  stellarAddress String
+  verified       Boolean  @default(false)
+  rating         Float    @default(0)
+  totalOrders    Int      @default(0)
+  completionRate Float    @default(0)
+  specialties    String[]
+  minOrderQty    Int      @default(1)
+  avgLeadDays    Int      @default(7)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  orders         Order[]
+  escrows        Escrow[]
+  storeProviders StoreProvider[]
+}
+
+model StoreProvider {
+  id         String  @id @default(uuid())
+  storeId    String
+  providerId String
+  status     String  @default("pending")
+  agreedRate Float?
+
+  store    Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, providerId])
+}
+
+model Design {
+  id               String    @id @default(uuid())
+  storeId          String
+  name             String
+  fileUrl          String
+  thumbnailUrl     String?
+  fileSha256       String
+  fileSizeBytes    Int
+  mimeType         String
+  width            Int?
+  height           Int?
+  copyrightTxHash  String?
+  copyrightLedger  Int?
+  copyrightAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  store      Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  mockups    Mockup[]
+  orderItems OrderItem[]
+
+  @@index([storeId])
+  @@index([fileSha256])
+}
+
+model Mockup {
+  id          String   @id @default(uuid())
+  designId    String
+  productType String
+  variant     String
+  imageUrl    String
+  createdAt   DateTime @default(now())
+
+  design Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  @@index([designId])
+}
+
+model Order {
+  id                 String      @id @default(uuid())
+  storeId            String
+  providerId         String?
+  shopifyOrderId     String
+  shopifyOrderNumber String
+  status             OrderStatus @default(PENDING)
+  customerName       String
+  shippingAddress    Json
+  trackingNumber     String?
+  trackingUrl        String?
+  shippedAt          DateTime?
+  deliveredAt        DateTime?
+  subtotalUsdc       Float
+  platformFeeUsdc    Float
+  providerPayUsdc    Float
+  totalUsdc          Float
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  store    Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider Provider?  @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  items    OrderItem[]
+  escrow   Escrow?
+
+  @@unique([storeId, shopifyOrderId])
+  @@index([storeId])
+  @@index([providerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id          String @id @default(uuid())
+  orderId     String
+  designId    String?
+  productType String
+  variant     String
+  quantity    Int
+  unitPrice   Float
+
+  order  Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  design Design? @relation(fields: [designId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+}
+
+model Escrow {
+  id             String       @id @default(uuid())
+  orderId        String       @unique
+  storeId        String
+  providerId     String?
+  status         EscrowStatus @default(LOCKING)
+  contractId     String?
+  lockTxHash     String?
+  releaseTxHash  String?
+  refundTxHash   String?
+  amountUsdc     Float
+  platformFee    Float
+  providerAmount Float
+  lockedAt       DateTime?
+  releasedAt     DateTime?
+  expiresAt      DateTime
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  order    Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  store    Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  disputes Dispute[]
+
+  @@index([storeId])
+  @@index([status])
+}
+
+model Dispute {
+  id         String    @id @default(uuid())
+  escrowId   String
+  raisedBy   String
+  reason     String
+  evidence   Json?
+  resolution String?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  @@index([escrowId])
+}
+
+model WebhookLog {
+  id               String    @id @default(uuid())
+  storeId          String
+  shopifyWebhookId String    @unique
+  topic            String
+  payload          Json
+  processedAt      DateTime?
+  error            String?
+  createdAt        DateTime  @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@index([createdAt])
+}
+
+model StellarTransaction {
+  id          String   @id @default(uuid())
+  txHash      String   @unique
+  ledger      Int
+  type        String
+  fromAddress String
+  toAddress   String?
+  amountUsdc  Float?
+  memo        String?
+  status      String   @default("pending")
+  rawXdr      String?
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([fromAddress])
+}

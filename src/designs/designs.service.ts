@@ -1,7 +1,9 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import * as crypto from 'crypto';
+import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
+import { S3Service } from '../common/services/s3.service';
 
 @Injectable()
 export class DesignsService {
@@ -10,6 +12,7 @@ export class DesignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
+    private readonly s3: S3Service,
   ) {}
 
   /**
@@ -35,12 +38,29 @@ export class DesignsService {
       `Uploading design: ${metadata.name}, hash=${fileSha256}, size=${file.size}`,
     );
 
-    // 2. Upload to S3
-    // TODO: Implement actual S3 upload using AWS SDK
-    const fileUrl = `https://s3.amazonaws.com/stellarpod-designs/${storeId}/${fileSha256}/${file.originalname}`;
-    const thumbnailUrl = null; // TODO: Generate thumbnail with sharp
+    // 2. Upload original file to S3
+    const s3Key = `designs/${storeId}/${fileSha256}/${file.originalname}`;
+    const fileUrl = await this.s3.uploadFile(s3Key, file.buffer, file.mimetype);
 
-    // 3. Register copyright hash on Stellar
+    // 3. Generate and upload thumbnail
+    let thumbnailUrl: string | null = null;
+    try {
+      const thumbnailBuffer = await sharp(file.buffer)
+        .resize(300, 300, { fit: 'inside', withoutEnlargement: true })
+        .toBuffer();
+      const thumbnailKey = `designs/${storeId}/${fileSha256}/thumbnail.png`;
+      thumbnailUrl = await this.s3.uploadFile(
+        thumbnailKey,
+        thumbnailBuffer,
+        'image/png',
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to generate thumbnail: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+
+    // 4. Register copyright hash on Stellar
     let copyrightTxHash: string | null = null;
     let copyrightLedger: number | null = null;
     let copyrightAt: Date | null = null;
@@ -66,7 +86,7 @@ export class DesignsService {
       // Non-fatal: design is still saved without blockchain registration
     }
 
-    // 4. Save design record
+    // 5. Save design record
     const design = await this.prisma.design.create({
       data: {
         storeId,
@@ -149,7 +169,18 @@ export class DesignsService {
       throw new NotFoundException(`Design ${designId} not found`);
     }
 
-    // TODO: Delete file from S3
+    // Delete files from S3
+    try {
+      const s3Key = design.fileUrl;
+      await this.s3.deleteFile(s3Key);
+      if (design.thumbnailUrl) {
+        await this.s3.deleteFile(design.thumbnailUrl);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Failed to delete files from storage: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
 
     await this.prisma.design.delete({ where: { id: designId } });
 

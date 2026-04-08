@@ -7,6 +7,8 @@ import { EscrowModule } from './escrow/escrow.module';
 import { OrdersModule } from './orders/orders.module';
 import { DesignsModule } from './designs/designs.module';
 import { ProvidersModule } from './providers/providers.module';
+import { StellarModule } from './stellar/stellar.module';
+import { MockupModule } from './mockup/mockup.module';
 
 @Module({
   imports: [
@@ -15,11 +17,13 @@ import { ProvidersModule } from './providers/providers.module';
       load: [configuration],
     }),
     PrismaModule,
+    StellarModule,
     ShopifyModule,
     EscrowModule,
     OrdersModule,
     DesignsModule,
     ProvidersModule,
+    MockupModule,
   ],
 })
 export class AppModule {}

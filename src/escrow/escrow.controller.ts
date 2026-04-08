@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Body,
+  Query,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -56,5 +57,45 @@ export class EscrowController {
   @ApiOperation({ summary: 'Get escrow by order ID' })
   async getEscrowByOrder(@Param('orderId') orderId: string) {
     return this.escrowService.getEscrowByOrderId(orderId);
+  }
+
+  @Post(':escrowId/dispute')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Raise a dispute on an escrow' })
+  async raiseDispute(
+    @Param('escrowId') escrowId: string,
+    @Body() body: { raisedBy: 'merchant' | 'provider'; reason: string; evidence?: Record<string, unknown> },
+  ) {
+    return this.escrowService.raiseDispute(
+      escrowId,
+      body.raisedBy,
+      body.reason,
+      body.evidence,
+    );
+  }
+
+  @Post(':escrowId/resolve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resolve a dispute with percentage split' })
+  async resolveDispute(
+    @Param('escrowId') escrowId: string,
+    @Body('providerPercent') providerPercent: number,
+  ) {
+    return this.escrowService.resolveDispute(escrowId, providerPercent);
+  }
+
+  @Get('store/:storeId')
+  @ApiOperation({ summary: 'Get all escrows for a store' })
+  async getStoreEscrows(
+    @Param('storeId') storeId: string,
+    @Query('status') status?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.escrowService.getStoreEscrows(storeId, {
+      status: status as any,
+      page,
+      limit,
+    });
   }
 }

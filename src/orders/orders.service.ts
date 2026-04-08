@@ -1,6 +1,11 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { OrderStatus } from '../../generated/prisma';
+import { OrderStatus, EscrowStatus } from '../../generated/prisma';
 
 @Injectable()
 export class OrdersService {
@@ -147,6 +152,152 @@ export class OrdersService {
     }
 
     return order;
+  }
+
+  /**
+   * Assign a print provider to an order.
+   */
+  async assignProvider(orderId: string, providerId: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    if (order.status !== OrderStatus.PENDING && order.status !== OrderStatus.ESCROW_LOCKED) {
+      throw new BadRequestException(
+        `Cannot assign provider when order status is ${order.status}`,
+      );
+    }
+
+    // Verify provider exists
+    const provider = await this.prisma.provider.findUnique({
+      where: { id: providerId },
+    });
+
+    if (!provider) {
+      throw new NotFoundException(`Provider ${providerId} not found`);
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        providerId,
+        status: OrderStatus.SENT_TO_PROVIDER,
+      },
+      include: { items: true, provider: true },
+    });
+
+    this.logger.log(
+      `Order ${orderId} assigned to provider ${providerId}`,
+    );
+
+    return updated;
+  }
+
+  /**
+   * Update tracking information for a shipped order.
+   */
+  async updateTracking(
+    orderId: string,
+    trackingNumber: string,
+    trackingUrl?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    if (
+      order.status !== OrderStatus.IN_PRODUCTION &&
+      order.status !== OrderStatus.SHIPPED
+    ) {
+      throw new BadRequestException(
+        `Cannot update tracking when order status is ${order.status}`,
+      );
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        trackingNumber,
+        ...(trackingUrl !== undefined ? { trackingUrl } : {}),
+        status: OrderStatus.SHIPPED,
+        shippedAt: order.shippedAt ?? new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Order ${orderId} tracking updated: ${trackingNumber}`,
+    );
+
+    return updated;
+  }
+
+  /**
+   * Cancel an order and trigger escrow refund if applicable.
+   */
+  async cancelOrder(orderId: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { escrow: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    const nonCancellableStatuses: OrderStatus[] = [
+      OrderStatus.SHIPPED,
+      OrderStatus.DELIVERED,
+      OrderStatus.ESCROW_RELEASED,
+      OrderStatus.CANCELLED,
+      OrderStatus.REFUNDED,
+    ];
+
+    if (nonCancellableStatuses.includes(order.status)) {
+      throw new BadRequestException(
+        `Cannot cancel order with status ${order.status}`,
+      );
+    }
+
+    // If there is a locked escrow, mark it for refund
+    const escrowUpdate =
+      order.escrow && order.escrow.status === EscrowStatus.LOCKED
+        ? this.prisma.escrow.update({
+            where: { id: order.escrow.id },
+            data: { status: EscrowStatus.REFUNDED },
+          })
+        : undefined;
+
+    const orderUpdate = this.prisma.order.update({
+      where: { id: orderId },
+      data: { status: OrderStatus.CANCELLED },
+      include: { items: true, escrow: true },
+    });
+
+    if (escrowUpdate) {
+      const [updatedOrder] = await this.prisma.$transaction([
+        orderUpdate,
+        escrowUpdate,
+      ]);
+
+      this.logger.log(
+        `Order ${orderId} cancelled with escrow refund initiated`,
+      );
+
+      return updatedOrder;
+    }
+
+    const updatedOrder = await orderUpdate;
+    this.logger.log(`Order ${orderId} cancelled`);
+
+    return updatedOrder;
   }
 
   /**

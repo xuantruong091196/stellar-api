@@ -122,32 +122,43 @@ export class EscrowService {
       throw new Error(`Escrow is not in LOCKED state (current: ${escrow.status})`);
     }
 
-    // TODO: Build and submit release transaction on Stellar
-    // For now, mark as releasing and record placeholder
     await this.prisma.escrow.update({
       where: { id: escrowId },
       data: { status: EscrowStatus.RELEASING },
     });
 
-    // TODO: Implement actual release transaction
-    const txHash = 'TODO_RELEASE_TX_HASH';
+    try {
+      const { txHash } = await this.stellar.buildAndSubmitReleaseTx(
+        escrow.provider!.stellarAddress,
+        escrow.providerAmount,
+        escrow.platformFee,
+        escrow.orderId,
+      );
 
-    await this.prisma.escrow.update({
-      where: { id: escrowId },
-      data: {
-        status: EscrowStatus.RELEASED,
-        releaseTxHash: txHash,
-        releasedAt: new Date(),
-      },
-    });
+      await this.prisma.escrow.update({
+        where: { id: escrowId },
+        data: {
+          status: EscrowStatus.RELEASED,
+          releaseTxHash: txHash,
+          releasedAt: new Date(),
+        },
+      });
 
-    await this.prisma.order.update({
-      where: { id: escrow.orderId },
-      data: { status: 'ESCROW_RELEASED' },
-    });
+      await this.prisma.order.update({
+        where: { id: escrow.orderId },
+        data: { status: 'ESCROW_RELEASED' },
+      });
 
-    this.logger.log(`Escrow ${escrowId} released: tx=${txHash}`);
-    return { txHash };
+      this.logger.log(`Escrow ${escrowId} released: tx=${txHash}`);
+      return { txHash };
+    } catch (err) {
+      // Revert to LOCKED if release tx fails
+      await this.prisma.escrow.update({
+        where: { id: escrowId },
+        data: { status: EscrowStatus.LOCKED },
+      });
+      throw err;
+    }
   }
 
   /**
@@ -171,24 +182,40 @@ export class EscrowService {
       );
     }
 
-    // TODO: Implement actual refund transaction on Stellar
-    const txHash = 'TODO_REFUND_TX_HASH';
-
-    await this.prisma.escrow.update({
-      where: { id: escrowId },
-      data: {
-        status: EscrowStatus.REFUNDED,
-        refundTxHash: txHash,
-      },
+    const store = await this.prisma.store.findUnique({
+      where: { id: escrow.storeId },
     });
 
-    await this.prisma.order.update({
-      where: { id: escrow.orderId },
-      data: { status: 'REFUNDED' },
-    });
+    if (!store?.stellarAddress) {
+      throw new Error('Store does not have a Stellar address');
+    }
 
-    this.logger.log(`Escrow ${escrowId} refunded: tx=${txHash}`);
-    return { txHash };
+    try {
+      const { txHash } = await this.stellar.buildAndSubmitRefundTx(
+        store.stellarAddress,
+        escrow.amountUsdc,
+        escrow.orderId,
+      );
+
+      await this.prisma.escrow.update({
+        where: { id: escrowId },
+        data: {
+          status: EscrowStatus.REFUNDED,
+          refundTxHash: txHash,
+        },
+      });
+
+      await this.prisma.order.update({
+        where: { id: escrow.orderId },
+        data: { status: 'REFUNDED' },
+      });
+
+      this.logger.log(`Escrow ${escrowId} refunded: tx=${txHash}`);
+      return { txHash };
+    } catch (err) {
+      this.logger.error(`Refund failed for escrow ${escrowId}: ${(err as Error).message}`);
+      throw err;
+    }
   }
 
   /**
@@ -205,6 +232,164 @@ export class EscrowService {
     }
 
     return escrow;
+  }
+
+  /**
+   * Raise a dispute on an escrow.
+   */
+  async raiseDispute(
+    escrowId: string,
+    raisedBy: 'merchant' | 'provider',
+    reason: string,
+    evidence?: Record<string, unknown>,
+  ) {
+    const escrow = await this.prisma.escrow.findUnique({
+      where: { id: escrowId },
+    });
+
+    if (!escrow) {
+      throw new NotFoundException(`Escrow ${escrowId} not found`);
+    }
+
+    if (escrow.status !== EscrowStatus.LOCKED) {
+      throw new Error(`Cannot dispute escrow in ${escrow.status} state`);
+    }
+
+    const [updatedEscrow, dispute] = await this.prisma.$transaction([
+      this.prisma.escrow.update({
+        where: { id: escrowId },
+        data: { status: EscrowStatus.DISPUTED },
+      }),
+      this.prisma.dispute.create({
+        data: {
+          escrowId,
+          raisedBy,
+          reason,
+          evidence: evidence ? JSON.parse(JSON.stringify(evidence)) : undefined,
+        },
+      }),
+      this.prisma.order.update({
+        where: { id: escrow.orderId },
+        data: { status: 'DISPUTED' },
+      }),
+    ]);
+
+    this.logger.log(`Dispute raised on escrow ${escrowId} by ${raisedBy}`);
+    return { escrow: updatedEscrow, dispute };
+  }
+
+  /**
+   * Resolve a dispute with a percentage split.
+   * providerPercent: 0-100 — how much of net goes to provider.
+   */
+  async resolveDispute(
+    escrowId: string,
+    providerPercent: number,
+  ): Promise<{ txHash: string }> {
+    const escrow = await this.prisma.escrow.findUnique({
+      where: { id: escrowId },
+      include: { store: true, provider: true },
+    });
+
+    if (!escrow) {
+      throw new NotFoundException(`Escrow ${escrowId} not found`);
+    }
+
+    if (escrow.status !== EscrowStatus.DISPUTED) {
+      throw new Error(`Escrow is not in DISPUTED state`);
+    }
+
+    if (providerPercent < 0 || providerPercent > 100) {
+      throw new Error('providerPercent must be 0-100');
+    }
+
+    const net = escrow.amountUsdc - escrow.platformFee;
+    const toProvider = (net * providerPercent) / 100;
+    const toMerchant = net - toProvider;
+
+    // Execute on-chain: pay provider their portion, refund merchant the rest
+    // Platform fee goes to system account regardless
+    let txHash = '';
+
+    if (toProvider > 0 && escrow.provider) {
+      const result = await this.stellar.buildAndSubmitReleaseTx(
+        escrow.provider.stellarAddress,
+        toProvider,
+        escrow.platformFee,
+        escrow.orderId,
+      );
+      txHash = result.txHash;
+    }
+
+    if (toMerchant > 0 && escrow.store.stellarAddress) {
+      const result = await this.stellar.buildAndSubmitRefundTx(
+        escrow.store.stellarAddress,
+        toMerchant,
+        escrow.orderId,
+      );
+      if (!txHash) txHash = result.txHash;
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.escrow.update({
+        where: { id: escrowId },
+        data: {
+          status: EscrowStatus.RELEASED,
+          releaseTxHash: txHash,
+          releasedAt: new Date(),
+        },
+      }),
+      this.prisma.dispute.updateMany({
+        where: { escrowId, resolvedAt: null },
+        data: {
+          resolution: `split:${providerPercent}/${100 - providerPercent}`,
+          resolvedAt: new Date(),
+        },
+      }),
+      this.prisma.order.update({
+        where: { id: escrow.orderId },
+        data: { status: 'ESCROW_RELEASED' },
+      }),
+    ]);
+
+    this.logger.log(
+      `Dispute resolved for escrow ${escrowId}: ${providerPercent}% to provider`,
+    );
+
+    return { txHash };
+  }
+
+  /**
+   * Get all escrows for a store with pagination.
+   */
+  async getStoreEscrows(
+    storeId: string,
+    options?: { status?: EscrowStatus; page?: number; limit?: number },
+  ) {
+    const page = options?.page || 1;
+    const limit = options?.limit || 20;
+    const skip = (page - 1) * limit;
+
+    const where = {
+      storeId,
+      ...(options?.status ? { status: options.status } : {}),
+    };
+
+    const [escrows, total] = await Promise.all([
+      this.prisma.escrow.findMany({
+        where,
+        include: { order: true, disputes: true },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.escrow.count({ where }),
+    ]);
+
+    return {
+      data: escrows,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   /**

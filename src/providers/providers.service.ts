@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -167,5 +168,114 @@ export class ProvidersService {
     }
 
     return provider;
+  }
+
+  /**
+   * Connect a store to a provider (create StoreProvider link).
+   */
+  async connectStore(
+    storeId: string,
+    providerId: string,
+    agreedRate?: number,
+  ) {
+    // Verify provider exists
+    const provider = await this.prisma.provider.findUnique({
+      where: { id: providerId },
+    });
+    if (!provider) {
+      throw new NotFoundException(`Provider ${providerId} not found`);
+    }
+
+    // Check for existing link
+    const existing = await this.prisma.storeProvider.findUnique({
+      where: { storeId_providerId: { storeId, providerId } },
+    });
+    if (existing) {
+      throw new ConflictException(
+        `Store ${storeId} is already connected to provider ${providerId}`,
+      );
+    }
+
+    const link = await this.prisma.storeProvider.create({
+      data: {
+        storeId,
+        providerId,
+        agreedRate: agreedRate ?? null,
+        status: 'active',
+      },
+      include: { provider: true },
+    });
+
+    this.logger.log(
+      `Store ${storeId} connected to provider ${providerId}`,
+    );
+    return link;
+  }
+
+  /**
+   * Disconnect a store from a provider (delete StoreProvider link).
+   */
+  async disconnectStore(storeId: string, providerId: string) {
+    const link = await this.prisma.storeProvider.findUnique({
+      where: { storeId_providerId: { storeId, providerId } },
+    });
+
+    if (!link) {
+      throw new NotFoundException(
+        `No connection found between store ${storeId} and provider ${providerId}`,
+      );
+    }
+
+    await this.prisma.storeProvider.delete({
+      where: { id: link.id },
+    });
+
+    this.logger.log(
+      `Store ${storeId} disconnected from provider ${providerId}`,
+    );
+  }
+
+  /**
+   * List all providers connected to a store.
+   */
+  async getStoreProviders(storeId: string) {
+    const links = await this.prisma.storeProvider.findMany({
+      where: { storeId },
+      include: { provider: true },
+    });
+
+    return links;
+  }
+
+  /**
+   * Update provider details.
+   */
+  async updateProvider(
+    providerId: string,
+    data: Partial<{
+      name: string;
+      country: string;
+      contactEmail: string;
+      stellarAddress: string;
+      specialties: string[];
+      minOrderQty: number;
+      avgLeadDays: number;
+    }>,
+  ) {
+    const provider = await this.prisma.provider.findUnique({
+      where: { id: providerId },
+    });
+
+    if (!provider) {
+      throw new NotFoundException(`Provider ${providerId} not found`);
+    }
+
+    const updated = await this.prisma.provider.update({
+      where: { id: providerId },
+      data,
+    });
+
+    this.logger.log(`Provider ${providerId} updated`);
+    return updated;
   }
 }

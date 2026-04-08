@@ -123,6 +123,184 @@ export class StellarService {
   }
 
   /**
+   * Build a release transaction: system account sends USDC from escrow holding
+   * to provider (provider_amount) and platform treasury (platform_fee).
+   *
+   * This is signed by the system key (arbiter).
+   */
+  async buildAndSubmitReleaseTx(
+    providerAddress: string,
+    providerAmount: number,
+    platformFee: number,
+    orderId: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Building release tx: provider=${providerAddress}, amount=${providerAmount}, fee=${platformFee}`,
+    );
+
+    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
+    if (!systemSecret) {
+      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    }
+
+    const systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
+    const systemAccount = await this.server.loadAccount(systemKeypair.publicKey());
+
+    const usdcAsset = this.getUsdcAsset();
+
+    const txBuilder = new StellarSdk.TransactionBuilder(systemAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    });
+
+    // Pay provider
+    if (providerAmount > 0) {
+      txBuilder.addOperation(
+        StellarSdk.Operation.payment({
+          destination: providerAddress,
+          asset: usdcAsset,
+          amount: providerAmount.toFixed(7),
+        }),
+      );
+    }
+
+    // Platform fee stays in system account (treasury)
+    // No operation needed — funds already in system account
+
+    const transaction = txBuilder
+      .addMemo(StellarSdk.Memo.text(`release:${orderId.slice(0, 18)}`))
+      .setTimeout(300)
+      .build();
+
+    transaction.sign(systemKeypair);
+
+    return this.submitAndRecord(transaction, 'escrow_release', systemKeypair.publicKey(), providerAddress, providerAmount);
+  }
+
+  /**
+   * Build a refund transaction: system account sends USDC back to merchant.
+   */
+  async buildAndSubmitRefundTx(
+    merchantAddress: string,
+    amount: number,
+    orderId: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Building refund tx: merchant=${merchantAddress}, amount=${amount}`,
+    );
+
+    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
+    if (!systemSecret) {
+      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    }
+
+    const systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
+    const systemAccount = await this.server.loadAccount(systemKeypair.publicKey());
+
+    const usdcAsset = this.getUsdcAsset();
+
+    const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: merchantAddress,
+          asset: usdcAsset,
+          amount: amount.toFixed(7),
+        }),
+      )
+      .addMemo(StellarSdk.Memo.text(`refund:${orderId.slice(0, 19)}`))
+      .setTimeout(300)
+      .build();
+
+    transaction.sign(systemKeypair);
+
+    return this.submitAndRecord(transaction, 'escrow_refund', systemKeypair.publicKey(), merchantAddress, amount);
+  }
+
+  /**
+   * Submit a transaction with fee bump retry logic.
+   *
+   * Strategy:
+   * 1. Submit with base fee
+   * 2. If timeout, wrap in FeeBumpTransaction with higher fee
+   * 3. Exponential fee increases: 200, 500, 1000, 5000 stroops
+   * 4. Max 5 attempts
+   */
+  async submitWithFeeBump(
+    transaction: StellarSdk.Transaction,
+    signerKeypair: StellarSdk.Keypair,
+  ): Promise<StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse> {
+    const fees = [200, 500, 1000, 5000];
+    let lastError: unknown;
+
+    // Attempt 1: original transaction
+    try {
+      return await this.server.submitTransaction(transaction);
+    } catch (err) {
+      lastError = err;
+      this.logger.warn(`Transaction submit failed, attempting fee bump`);
+    }
+
+    // Fee bump attempts
+    for (const fee of fees) {
+      try {
+        const feeBump = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
+          signerKeypair,
+          String(fee),
+          transaction,
+          this.networkPassphrase,
+        );
+        feeBump.sign(signerKeypair);
+
+        this.logger.log(`Fee bump attempt with fee=${fee}`);
+        return await this.server.submitTransaction(feeBump);
+      } catch (err) {
+        lastError = err;
+        this.logger.warn(`Fee bump with fee=${fee} failed`);
+      }
+    }
+
+    throw lastError;
+  }
+
+  // ─── PRIVATE HELPERS ────────────────────────
+
+  private getUsdcAsset(): StellarSdk.Asset {
+    return new StellarSdk.Asset(
+      'USDC',
+      'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+    );
+  }
+
+  private async submitAndRecord(
+    transaction: StellarSdk.Transaction,
+    type: string,
+    fromAddress: string,
+    toAddress: string,
+    amount: number,
+  ): Promise<{ txHash: string; ledger: number }> {
+    const result = await this.server.submitTransaction(transaction);
+
+    await this.prisma.stellarTransaction.create({
+      data: {
+        txHash: result.hash,
+        ledger: result.ledger,
+        type,
+        fromAddress,
+        toAddress,
+        amountUsdc: amount,
+        status: 'confirmed',
+        rawXdr: transaction.toXDR(),
+      },
+    });
+
+    this.logger.log(`${type} tx submitted: hash=${result.hash}, ledger=${result.ledger}`);
+    return { txHash: result.hash, ledger: result.ledger };
+  }
+
+  /**
    * Register a design file hash on the Stellar ledger as a copyright proof.
    * Uses a manage-data operation to store the SHA-256 hash.
    */

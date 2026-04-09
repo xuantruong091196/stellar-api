@@ -6,6 +6,7 @@ WORKDIR /app
 # Install production dependencies + generate Prisma client
 COPY package.json yarn.lock ./
 COPY prisma ./prisma
+COPY prisma.config.ts ./
 
 RUN yarn install --frozen-lockfile --production && \
     npx prisma generate && \
@@ -19,6 +20,7 @@ WORKDIR /app
 # Install ALL dependencies (including devDependencies for build)
 COPY package.json yarn.lock ./
 COPY prisma ./prisma
+COPY prisma.config.ts ./
 
 RUN yarn install --frozen-lockfile && \
     npx prisma generate && \

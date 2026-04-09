@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { readSecret } from './config/read-secret';
@@ -29,9 +30,25 @@ async function bootstrap() {
   // Global logging interceptor
   app.useGlobalInterceptors(new LoggingInterceptor());
 
-  // CORS
+  // CORS — accept a comma-separated list of origins and echo back whichever
+  // origin matches. The Access-Control-Allow-Origin header must be a single
+  // origin (not a list) to be valid, and wildcards are incompatible with
+  // `credentials: true`, so we resolve it per request.
+  const rawCorsOrigin = process.env.CORS_ORIGIN || '*';
+  const corsOrigin: CorsOptions['origin'] = rawCorsOrigin === '*'
+    ? true
+    : (() => {
+        const allowed = rawCorsOrigin
+          .split(',')
+          .map((o) => o.trim())
+          .filter(Boolean);
+        return (origin, cb) => {
+          if (!origin || allowed.includes(origin)) return cb(null, true);
+          return cb(new Error(`Origin ${origin} not allowed by CORS`), false);
+        };
+      })();
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: corsOrigin,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });

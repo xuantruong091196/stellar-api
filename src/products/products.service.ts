@@ -133,6 +133,36 @@ export class ProductsService {
       throw new BadRequestException('Store not connected to Shopify');
     }
 
+    // Demo / dev mode: the store was auto-upserted by the dev bypass with
+    // shopifyToken='dev-token'. Skip the real Shopify API call, mark the
+    // product as published locally and synthesise a fake shopifyProductId
+    // so the UI behaves identically.
+    if (store.shopifyToken === 'dev-token' || store.plan === 'dev') {
+      const fakeShopifyProductId = `demo-${merchantProductId.slice(0, 12)}`;
+      const updated = await this.prisma.merchantProduct.update({
+        where: { id: merchantProductId },
+        data: {
+          shopifyProductId: fakeShopifyProductId,
+          shopifyProductGid: `gid://shopify/Product/${fakeShopifyProductId}`,
+          status: 'published',
+          publishedAt: new Date(),
+        },
+      });
+      this.logger.log(
+        `[DEMO] Product "${product.title}" marked as published without hitting Shopify`,
+      );
+      return {
+        ...updated,
+        shopify: {
+          productId: fakeShopifyProductId,
+          productGid: `gid://shopify/Product/${fakeShopifyProductId}`,
+          variantCount: product.providerProduct.variants.length,
+          storeUrl: null,
+          demo: true,
+        },
+      };
+    }
+
     // Decrypt access token
     const accessToken = this.decryptToken(store.shopifyToken);
     const variants = product.providerProduct.variants;

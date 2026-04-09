@@ -111,10 +111,10 @@ async function main() {
       { name: 'left-sleeve', widthPx: 1200, heightPx: 1200, dpi: 300 },
     ],
     blankImages: {
-      Black: 'https://cdn.stellarpod.com/blanks/bc3001-black.png',
-      White: 'https://cdn.stellarpod.com/blanks/bc3001-white.png',
-      Navy: 'https://cdn.stellarpod.com/blanks/bc3001-navy.png',
-      'Heather Gray': 'https://cdn.stellarpod.com/blanks/bc3001-heather-gray.png',
+      Black: 'https://placehold.co/600x600/1a1a2e/6366F1?text=bc3001-black.png',
+      White: 'https://placehold.co/600x600/1a1a2e/6366F1?text=bc3001-white.png',
+      Navy: 'https://placehold.co/600x600/1a1a2e/6366F1?text=bc3001-navy.png',
+      'Heather Gray': 'https://placehold.co/600x600/1a1a2e/6366F1?text=bc3001-heather-gray.png',
     },
     sizeChart: {
       S: { chest_cm: 86, length_cm: 71, sleeve_cm: 20 },
@@ -157,9 +157,9 @@ async function main() {
       { name: 'back', widthPx: 4200, heightPx: 5400, dpi: 300 },
     ],
     blankImages: {
-      Black: 'https://cdn.stellarpod.com/blanks/g18500-black.png',
-      'Sport Grey': 'https://cdn.stellarpod.com/blanks/g18500-sport-grey.png',
-      Navy: 'https://cdn.stellarpod.com/blanks/g18500-navy.png',
+      Black: 'https://placehold.co/600x600/1a1a2e/6366F1?text=g18500-black.png',
+      'Sport Grey': 'https://placehold.co/600x600/1a1a2e/6366F1?text=g18500-sport-grey.png',
+      Navy: 'https://placehold.co/600x600/1a1a2e/6366F1?text=g18500-navy.png',
     },
     sizeChart: {
       S: { chest_cm: 97, length_cm: 66, sleeve_cm: 86 },
@@ -194,8 +194,8 @@ async function main() {
       { name: 'wrap', widthPx: 4500, heightPx: 1900, dpi: 300 },
     ],
     blankImages: {
-      White: 'https://cdn.stellarpod.com/blanks/mug-11oz-white.png',
-      Black: 'https://cdn.stellarpod.com/blanks/mug-11oz-black.png',
+      White: 'https://placehold.co/600x600/1a1a2e/6366F1?text=mug-11oz-white.png',
+      Black: 'https://placehold.co/600x600/1a1a2e/6366F1?text=mug-11oz-black.png',
     },
     sizeChart: undefined,
     weightGrams: 330,
@@ -219,7 +219,7 @@ async function main() {
       { name: 'front', widthPx: 5400, heightPx: 7200, dpi: 300 },
     ],
     blankImages: {
-      White: 'https://cdn.stellarpod.com/blanks/poster-matte-white.png',
+      White: 'https://placehold.co/600x600/1a1a2e/6366F1?text=poster-matte-white.png',
     },
     sizeChart: undefined,
     weightGrams: 120,
@@ -245,9 +245,9 @@ async function main() {
       { name: 'back', widthPx: 3600, heightPx: 3600, dpi: 300 },
     ],
     blankImages: {
-      Natural: 'https://cdn.stellarpod.com/blanks/tote-natural.png',
-      Black: 'https://cdn.stellarpod.com/blanks/tote-black.png',
-      Navy: 'https://cdn.stellarpod.com/blanks/tote-navy.png',
+      Natural: 'https://placehold.co/600x600/1a1a2e/6366F1?text=tote-natural.png',
+      Black: 'https://placehold.co/600x600/1a1a2e/6366F1?text=tote-black.png',
+      Navy: 'https://placehold.co/600x600/1a1a2e/6366F1?text=tote-navy.png',
     },
     sizeChart: undefined,
     weightGrams: 280,

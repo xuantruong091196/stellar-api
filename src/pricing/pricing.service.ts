@@ -82,9 +82,11 @@ export class PricingService {
 
     return {
       baseCost,
+      retailPrice,
       variantSurcharge,
       subtotal,
       platformFee,
+      platformFeeRate: this.platformFeeRate,
       profitMargin,
       profitPercent,
     };

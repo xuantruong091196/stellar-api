@@ -50,10 +50,15 @@ export class ShopifySessionGuard implements CanActivate {
     // the X-Wallet-Address header against an active server session.
     const devStore = request.headers['x-dev-store'];
     if (devStore) {
+      // Use the header value as the Store.id so that the frontend can keep
+      // sending the same literal "demo-store" to every endpoint that takes
+      // a storeId path param. Upserting on `id` also cleans up any previous
+      // UUID-based row from earlier builds.
       const store = await this.prisma.store.upsert({
-        where: { shopifyDomain: `${devStore}.myshopify.com` },
+        where: { id: devStore },
         update: {},
         create: {
+          id: devStore,
           shopifyDomain: `${devStore}.myshopify.com`,
           shopifyToken: 'dev-token',
           name: `Dev Store (${devStore})`,

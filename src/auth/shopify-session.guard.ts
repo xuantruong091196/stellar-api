@@ -42,6 +42,29 @@ export class ShopifySessionGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest();
+
+    // DEV MODE BYPASS: If NODE_ENV=development and X-Dev-Store header is set,
+    // upsert a demo store and attach it to the request. This allows local dev
+    // without a real Shopify install.
+    if (process.env.NODE_ENV === 'development') {
+      const devStore = request.headers['x-dev-store'];
+      if (devStore) {
+        const store = await this.prisma.store.upsert({
+          where: { shopifyDomain: `${devStore}.myshopify.com` },
+          update: {},
+          create: {
+            shopifyDomain: `${devStore}.myshopify.com`,
+            shopifyToken: 'dev-token',
+            name: `Dev Store (${devStore})`,
+            email: 'dev@stellarpod.local',
+            plan: 'dev',
+          },
+        });
+        request.store = store;
+        return true;
+      }
+    }
+
     const authHeader = request.headers['authorization'];
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {

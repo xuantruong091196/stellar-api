@@ -14,6 +14,8 @@ import { Request, Response } from 'express';
 import * as crypto from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
+import { Public } from '../auth/decorators/public.decorator';
+import { OrderStatus } from '../../generated/prisma';
 
 @ApiTags('shopify')
 @Controller('shopify')
@@ -27,6 +29,7 @@ export class ShopifyController {
   ) {}
 
   @Post('webhooks')
+  @Public()
   @ApiOperation({ summary: 'Receive Shopify webhooks' })
   async handleWebhook(
     @Req() req: RawBodyRequest<Request>,
@@ -99,12 +102,65 @@ export class ShopifyController {
         case 'orders/create':
           await this.ordersService.createFromWebhook(store.id, payload);
           break;
+
         case 'orders/updated':
-          // TODO: handle order updates
+          this.logger.log(
+            `Order updated for store ${store.shopifyDomain}: ${payload.id}`,
+          );
           break;
+
         case 'orders/cancelled':
-          // TODO: handle order cancellation
+          await this.handleOrderCancelled(store.id, payload);
           break;
+
+        case 'refunds/create':
+          await this.handleRefundCreated(store.id, payload);
+          break;
+
+        case 'products/update':
+          this.logger.log(
+            `Product updated for store ${store.shopifyDomain}: ${payload.id} — "${payload.title}"`,
+          );
+          // TODO: sync product title/price changes back to MerchantProduct
+          break;
+
+        case 'products/delete':
+          this.logger.log(
+            `Product deleted for store ${store.shopifyDomain}: ${payload.id}`,
+          );
+          // TODO: mark MerchantProduct as deleted when MerchantProduct model exists
+          break;
+
+        case 'app/uninstalled':
+          this.logger.log(
+            `App uninstalled for store ${store.shopifyDomain}`,
+          );
+          await this.prisma.store.delete({
+            where: { id: store.id },
+          });
+          break;
+
+        case 'customers/data_request':
+          this.logger.log(
+            `Customer data request for store ${store.shopifyDomain} — no separate customer data stored`,
+          );
+          break;
+
+        case 'customers/redact':
+          this.logger.log(
+            `Customer redact request for store ${store.shopifyDomain} — no separate customer data stored`,
+          );
+          break;
+
+        case 'shop/redact':
+          this.logger.log(
+            `Shop redact request for store ${store.shopifyDomain}`,
+          );
+          await this.prisma.store.delete({
+            where: { id: store.id },
+          });
+          break;
+
         default:
           this.logger.log(`Unhandled webhook topic: ${topic}`);
       }
@@ -127,5 +183,73 @@ export class ShopifyController {
     }
 
     return res.status(HttpStatus.OK).send();
+  }
+
+  // ── Private webhook handlers ────────────────────────────────────────
+
+  private async handleOrderCancelled(
+    storeId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const shopifyOrderId = String(payload.id);
+
+    const order = await this.prisma.order.findUnique({
+      where: {
+        storeId_shopifyOrderId: { storeId, shopifyOrderId },
+      },
+    });
+
+    if (!order) {
+      this.logger.warn(
+        `Order ${shopifyOrderId} not found for cancellation in store ${storeId}`,
+      );
+      return;
+    }
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { status: OrderStatus.CANCELLED },
+    });
+
+    this.logger.log(`Order ${order.id} cancelled via webhook`);
+  }
+
+  private async handleRefundCreated(
+    storeId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const shopifyOrderId = String(payload.order_id);
+
+    const order = await this.prisma.order.findUnique({
+      where: {
+        storeId_shopifyOrderId: { storeId, shopifyOrderId },
+      },
+      include: { escrow: true },
+    });
+
+    if (!order) {
+      this.logger.warn(
+        `Order ${shopifyOrderId} not found for refund in store ${storeId}`,
+      );
+      return;
+    }
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { status: OrderStatus.REFUNDED },
+    });
+
+    // If there is a locked escrow, mark it for refund
+    if (order.escrow && order.escrow.status === 'LOCKED') {
+      await this.prisma.escrow.update({
+        where: { id: order.escrow.id },
+        data: { status: 'REFUNDED' },
+      });
+      this.logger.log(
+        `Escrow ${order.escrow.id} marked for refund due to Shopify refund`,
+      );
+    }
+
+    this.logger.log(`Order ${order.id} refunded via webhook`);
   }
 }

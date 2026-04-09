@@ -1,50 +1,70 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl as awsGetSignedUrl } from '@aws-sdk/s3-request-presigner';
 import * as fs from 'fs';
 import * as path from 'path';
+import { readSecret } from '../../config/read-secret';
 
 @Injectable()
 export class S3Service {
   private readonly logger = new Logger(S3Service.name);
+  private readonly client: S3Client | null = null;
   private readonly bucket: string | undefined;
-  private readonly region: string | undefined;
+  private readonly r2PublicUrl: string | undefined;
   private readonly localUploadDir: string;
 
   constructor(private readonly configService: ConfigService) {
-    this.bucket = this.configService.get<string>('AWS_S3_BUCKET');
-    this.region = this.configService.get<string>('AWS_REGION');
+    this.bucket = this.configService.get<string>('aws.s3Bucket');
+    const accountId = this.configService.get<string>('aws.r2AccountId');
+    const accessKeyId = this.configService.get<string>('aws.accessKeyId');
+    const secretAccessKey = readSecret('AWS_SECRET_ACCESS_KEY');
+
     this.localUploadDir = path.resolve(process.cwd(), 'uploads');
 
-    if (!this.bucket) {
+    if (this.bucket && accountId && accessKeyId && secretAccessKey) {
+      this.client = new S3Client({
+        region: 'auto',
+        endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+        credentials: {
+          accessKeyId,
+          secretAccessKey,
+        },
+      });
+      this.r2PublicUrl = this.configService.get<string>('aws.r2PublicUrl');
+      this.logger.log(`R2 storage configured: bucket=${this.bucket}`);
+    } else {
       this.logger.warn(
-        'AWS_S3_BUCKET is not configured. Files will be saved to local ./uploads/ directory instead.',
+        'R2 is not fully configured. Files will be saved to local ./uploads/ directory instead.',
       );
       fs.mkdirSync(this.localUploadDir, { recursive: true });
     }
   }
 
-  /**
-   * Upload a file to S3, or to local disk if S3 is not configured.
-   * Returns the public URL of the uploaded file.
-   */
   async uploadFile(
     key: string,
     buffer: Buffer,
     contentType: string,
   ): Promise<string> {
-    if (this.bucket) {
-      // TODO: Replace with actual AWS SDK S3 upload when @aws-sdk/client-s3 is installed
-      // const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-      // const client = new S3Client({ region: this.region });
-      // await client.send(new PutObjectCommand({
-      //   Bucket: this.bucket,
-      //   Key: key,
-      //   Body: buffer,
-      //   ContentType: contentType,
-      // }));
-      this.logger.warn(
-        'AWS SDK is not installed. Falling back to local file storage.',
+    if (this.client && this.bucket) {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Body: buffer,
+          ContentType: contentType,
+        }),
       );
+      const url = this.r2PublicUrl
+        ? `${this.r2PublicUrl}/${key}`
+        : await this.getSignedUrl(key);
+      this.logger.log(`File uploaded to R2: ${key}`);
+      return url;
     }
 
     // Fallback: save to local filesystem
@@ -58,14 +78,16 @@ export class S3Service {
     return localUrl;
   }
 
-  /**
-   * Delete a file from S3, or from local disk if S3 is not configured.
-   */
   async deleteFile(key: string): Promise<void> {
-    if (this.bucket) {
-      this.logger.warn(
-        'AWS SDK is not installed. Falling back to local file deletion.',
+    if (this.client && this.bucket) {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        }),
       );
+      this.logger.log(`File deleted from R2: ${key}`);
+      return;
     }
 
     // Fallback: delete from local filesystem
@@ -76,15 +98,13 @@ export class S3Service {
     }
   }
 
-  /**
-   * Get a signed URL for a file, or return the local path if S3 is not configured.
-   */
   async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
-    if (this.bucket) {
-      // TODO: Replace with actual AWS SDK GetObjectCommand + getSignedUrl
-      this.logger.warn(
-        'AWS SDK is not installed. Returning local file path instead of signed URL.',
-      );
+    if (this.client && this.bucket) {
+      const command = new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      });
+      return awsGetSignedUrl(this.client, command, { expiresIn });
     }
 
     return `/uploads/${key}`;

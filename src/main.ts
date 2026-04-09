@@ -3,11 +3,12 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { readSecret } from './config/read-secret';
 
 async function bootstrap() {
-  // Validate critical env vars before starting
-  if (!process.env.DATABASE_URL) {
-    console.error('FATAL: DATABASE_URL environment variable is required');
+  // Validate critical env vars / secrets before starting
+  if (!readSecret('DATABASE_URL')) {
+    console.error('FATAL: DATABASE_URL environment variable or Docker secret is required');
     process.exit(1);
   }
 

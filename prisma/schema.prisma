@@ -45,11 +45,12 @@ model Store {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  designs        Design[]
-  orders         Order[]
-  escrows        Escrow[]
-  storeProviders StoreProvider[]
-  webhookLogs    WebhookLog[]
+  designs          Design[]
+  orders           Order[]
+  escrows          Escrow[]
+  storeProviders   StoreProvider[]
+  webhookLogs      WebhookLog[]
+  merchantProducts MerchantProduct[]
 }
 
 model Provider {
@@ -65,12 +66,17 @@ model Provider {
   specialties    String[]
   minOrderQty    Int      @default(1)
   avgLeadDays    Int      @default(7)
+  passwordHash   String?
+  lastLoginAt    DateTime?
+  apiKey         String?   @unique
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  orders         Order[]
-  escrows        Escrow[]
-  storeProviders StoreProvider[]
+  orders           Order[]
+  escrows          Escrow[]
+  storeProviders   StoreProvider[]
+  products         ProviderProduct[]
+  providerOrders   ProviderOrder[]
 }
 
 model StoreProvider {
@@ -103,9 +109,10 @@ model Design {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  store      Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  mockups    Mockup[]
-  orderItems OrderItem[]
+  store            Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  mockups          Mockup[]
+  orderItems       OrderItem[]
+  merchantProducts MerchantProduct[]
 
   @@index([storeId])
   @@index([fileSha256])
@@ -130,6 +137,7 @@ model Order {
   providerId         String?
   shopifyOrderId     String
   shopifyOrderNumber String
+  shopifyOrderGid    String?
   status             OrderStatus @default(PENDING)
   customerName       String
   shippingAddress    Json
@@ -144,10 +152,11 @@ model Order {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
-  store    Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  provider Provider?  @relation(fields: [providerId], references: [id], onDelete: SetNull)
-  items    OrderItem[]
-  escrow   Escrow?
+  store          Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  provider       Provider?       @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  items          OrderItem[]
+  escrow         Escrow?
+  providerOrders ProviderOrder[]
 
   @@unique([storeId, shopifyOrderId])
   @@index([storeId])
@@ -171,11 +180,12 @@ model OrderItem {
 }
 
 model Escrow {
-  id             String       @id @default(uuid())
-  orderId        String       @unique
-  storeId        String
-  providerId     String?
-  status         EscrowStatus @default(LOCKING)
+  id               String       @id @default(uuid())
+  orderId          String       @unique
+  storeId          String
+  providerId       String?
+  providerOrderId  String?
+  status           EscrowStatus @default(LOCKING)
   contractId     String?
   lockTxHash     String?
   releaseTxHash  String?
@@ -244,4 +254,102 @@ model StellarTransaction {
 
   @@index([type])
   @@index([fromAddress])
+}
+
+// ─── MERCHANT PRODUCT (Shopify <-> Design <-> Provider mapping) ────
+
+model MerchantProduct {
+  id                 String    @id @default(uuid())
+  storeId            String
+  designId           String
+  providerProductId  String
+  shopifyProductId   String?   // Numeric Shopify product ID
+  shopifyProductGid  String?   // GraphQL GID: gid://shopify/Product/xxx
+  title              String
+  description        String?
+  retailPrice        Float     // What the customer pays
+  baseCost           Float     // What the provider charges
+  profitMargin       Float     // retailPrice - baseCost - platformFee
+  printConfig        Json      // { printArea, x, y, scale, rotation }
+  status             String    @default("draft") // draft, publishing, published, error
+  publishedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  store              Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  design             Design    @relation(fields: [designId], references: [id])
+  providerProduct    ProviderProduct @relation(fields: [providerProductId], references: [id])
+
+  @@index([storeId])
+  @@index([shopifyProductId])
+  @@map("merchant_products")
+}
+
+model ProviderProduct {
+  id              String   @id @default(uuid())
+  providerId      String
+  productType     String   // "t-shirt", "hoodie", "mug", "poster", "tote-bag"
+  name            String   // "Bella+Canvas 3001 Unisex Jersey Tee"
+  brand           String?
+  description     String?
+  baseCost        Float    // USD base cost per unit
+  printAreas      Json     // [{ name: "front", widthPx: 4200, heightPx: 4800, dpi: 300 }, { name: "back", widthPx: 4200, heightPx: 4800, dpi: 300 }]
+  blankImages     Json     // { "Black": "https://...", "White": "https://..." }
+  sizeChart       Json?    // { "S": { "chest_cm": 86, "length_cm": 71 }, "M": { ... } }
+  weightGrams     Float?   // per unit weight for shipping calc
+  productionDays  Int      @default(3)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  provider         Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  variants         ProviderProductVariant[]
+  merchantProducts MerchantProduct[]
+
+  @@index([providerId])
+  @@index([productType])
+  @@map("provider_products")
+}
+
+model ProviderProductVariant {
+  id                String  @id @default(uuid())
+  providerProductId String
+  size              String  // "S", "M", "L", "XL", "2XL"
+  color             String  // "Black", "White", "Navy"
+  colorHex          String? // "#000000"
+  sku               String  // Provider's internal SKU
+  additionalCost    Float   @default(0) // Extra cost for 2XL+ sizes
+  inStock           Boolean @default(true)
+
+  providerProduct   ProviderProduct @relation(fields: [providerProductId], references: [id], onDelete: Cascade)
+
+  @@unique([providerProductId, size, color])
+  @@index([providerProductId])
+  @@map("provider_product_variants")
+}
+
+model ProviderOrder {
+  id              String   @id @default(uuid())
+  orderId         String
+  providerId      String
+  status          String   @default("pending")
+  // pending → accepted → printing → quality_check → packing → shipped → delivered
+  totalBaseCost   Float
+  platformFee     Float
+  trackingNumber  String?
+  trackingUrl     String?
+  trackingCompany String?
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+  designFileUrls  Json?    // URLs of print-ready files for this sub-order
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider        Provider @relation(fields: [providerId], references: [id])
+
+  @@index([orderId])
+  @@index([providerId])
+  @@index([status])
+  @@map("provider_orders")
 }

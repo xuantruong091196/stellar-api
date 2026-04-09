@@ -52,6 +52,7 @@ export class OrdersService {
         storeId,
         shopifyOrderId,
         shopifyOrderNumber,
+        shopifyOrderGid: `gid://shopify/Order/${shopifyOrderId}`,
         status: OrderStatus.PENDING,
         customerName,
         shippingAddress: shippingAddress as object,
@@ -69,6 +70,9 @@ export class OrdersService {
     this.logger.log(
       `Order created: ${order.id} (Shopify #${shopifyOrderNumber})`,
     );
+
+    // ── Split into ProviderOrders by matching MerchantProduct ──
+    await this.createProviderOrders(order.id, storeId, payload);
 
     return order;
   }
@@ -298,6 +302,98 @@ export class OrdersService {
     this.logger.log(`Order ${orderId} cancelled`);
 
     return updatedOrder;
+  }
+
+  /**
+   * Create ProviderOrder sub-orders by matching line items to MerchantProducts.
+   * Groups items by provider and creates one ProviderOrder per provider.
+   */
+  private async createProviderOrders(
+    orderId: string,
+    storeId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const lineItems =
+      (payload.line_items as Array<Record<string, unknown>>) || [];
+
+    // Group items by provider via MerchantProduct lookup
+    const providerGroups = new Map<
+      string,
+      { baseCostTotal: number; designFileUrls: string[] }
+    >();
+
+    for (const item of lineItems) {
+      const shopifyProductId = item.product_id
+        ? String(item.product_id)
+        : null;
+
+      if (!shopifyProductId) {
+        this.logger.warn(
+          `Line item "${item.title}" has no product_id, skipping provider matching`,
+        );
+        continue;
+      }
+
+      const merchantProduct = await this.prisma.merchantProduct.findFirst({
+        where: { storeId, shopifyProductId },
+        include: {
+          providerProduct: true,
+          design: true,
+        },
+      });
+
+      if (!merchantProduct) {
+        this.logger.warn(
+          `No MerchantProduct found for shopifyProductId=${shopifyProductId}, skipping`,
+        );
+        continue;
+      }
+
+      const providerId = merchantProduct.providerProduct.providerId;
+      const quantity = Number(item.quantity || 1);
+      const itemBaseCost = merchantProduct.baseCost * quantity;
+
+      const group = providerGroups.get(providerId) || {
+        baseCostTotal: 0,
+        designFileUrls: [],
+      };
+
+      group.baseCostTotal += itemBaseCost;
+
+      if (
+        merchantProduct.design.fileUrl &&
+        !group.designFileUrls.includes(merchantProduct.design.fileUrl)
+      ) {
+        group.designFileUrls.push(merchantProduct.design.fileUrl);
+      }
+
+      providerGroups.set(providerId, group);
+
+      this.logger.log(
+        `Line item "${item.title}" (shopifyProductId=${shopifyProductId}) → provider ${providerId}`,
+      );
+    }
+
+    // Create a ProviderOrder per provider group
+    const platformFeeRate = 0.05;
+
+    for (const [providerId, group] of providerGroups) {
+      const platformFee = group.baseCostTotal * platformFeeRate;
+
+      const providerOrder = await this.prisma.providerOrder.create({
+        data: {
+          orderId,
+          providerId,
+          totalBaseCost: group.baseCostTotal,
+          platformFee,
+          designFileUrls: group.designFileUrls,
+        },
+      });
+
+      this.logger.log(
+        `ProviderOrder created: ${providerOrder.id} for provider ${providerId} (baseCost=${group.baseCostTotal})`,
+      );
+    }
   }
 
   /**

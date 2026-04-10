@@ -3,13 +3,9 @@ import { Injectable, Logger } from '@nestjs/common';
 const FREEPIK_API = 'https://api.freepik.com/v1';
 
 export interface AiEnhanceOptions {
-  /** Base64 PNG of the draft design from canvas */
   imageBase64: string;
-  /** Style prompt — what the AI should aim for */
   prompt?: string;
-  /** 0.0–1.0: how much to keep original structure (0.4–0.6 recommended) */
   strength?: number;
-  /** Upscale after generation: '2x' | '4x' | null */
   upscale?: '2x' | '4x' | null;
 }
 
@@ -25,10 +21,6 @@ export class AiEnhanceService {
   private readonly logger = new Logger(AiEnhanceService.name);
   private readonly apiKey = process.env.FREEPIK_API_KEY || '';
 
-  /**
-   * Send the user's draft canvas export to Freepik AI for re-rendering.
-   * Uses the Pikaso/Reimagine endpoint to smooth and unify the design.
-   */
   async enhance(options: AiEnhanceOptions): Promise<AiEnhanceResult> {
     const {
       imageBase64,
@@ -43,8 +35,11 @@ export class AiEnhanceService {
 
     this.logger.log(`AI enhance request: strength=${strength}, upscale=${upscale || 'none'}`);
 
-    // Step 1: Image-to-Image reimagine via Freepik AI
-    const reimagineRes = await fetch(`${FREEPIK_API}/ai/image-to-image`, {
+    // Map strength to imagination level
+    const imagination = strength <= 0.3 ? 'subtle' : strength >= 0.7 ? 'wild' : 'vivid';
+
+    // Step 1: Reimagine via Freepik Flux
+    const reimagineRes = await fetch(`${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux`, {
       method: 'POST',
       headers: {
         'x-freepik-api-key': this.apiKey,
@@ -54,61 +49,73 @@ export class AiEnhanceService {
       body: JSON.stringify({
         image: imageBase64,
         prompt,
-        strength,
-        num_images: 1,
+        imagination,
+        aspect_ratio: 'square_1_1',
       }),
     });
 
     if (!reimagineRes.ok) {
       const body = await reimagineRes.text();
-      this.logger.error(`Freepik AI reimagine failed: ${reimagineRes.status} ${body}`);
+      this.logger.error(`Freepik reimagine failed: ${reimagineRes.status} ${body}`);
       throw new Error(`AI enhancement failed: ${reimagineRes.status}`);
     }
 
     const reimagineData = await reimagineRes.json() as {
-      data: { url: string; width: number; height: number }[];
+      data: {
+        generated?: string[];
+        task_id?: string;
+        status?: string;
+      };
     };
 
-    let resultUrl = reimagineData.data?.[0]?.url;
-    let width = reimagineData.data?.[0]?.width || 0;
-    let height = reimagineData.data?.[0]?.height || 0;
+    // Poll if task not yet completed
+    let imageUrl = reimagineData.data?.generated?.[0] || '';
+    const taskId = reimagineData.data?.task_id;
+    let status = reimagineData.data?.status || '';
 
-    if (!resultUrl) {
+    if (!imageUrl && taskId && status !== 'COMPLETED') {
+      imageUrl = await this.pollTask(taskId);
+    }
+
+    if (!imageUrl) {
       throw new Error('AI returned no image');
     }
 
-    // Step 2: Upscale if requested
-    if (upscale && (upscale === '2x' || upscale === '4x')) {
-      this.logger.log(`Upscaling result ${upscale}...`);
-      const upscaleRes = await fetch(`${FREEPIK_API}/ai/upscale`, {
-        method: 'POST',
+    this.logger.log(`AI enhance complete: ${imageUrl.substring(0, 80)}...`);
+    return { imageUrl, width: 0, height: 0, prompt };
+  }
+
+  private async pollTask(taskId: string, maxAttempts = 30): Promise<string> {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const res = await fetch(`${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux/${taskId}`, {
         headers: {
           'x-freepik-api-key': this.apiKey,
-          'Content-Type': 'application/json',
           Accept: 'application/json',
         },
-        body: JSON.stringify({
-          image_url: resultUrl,
-          scale: upscale === '4x' ? 4 : 2,
-        }),
       });
 
-      if (upscaleRes.ok) {
-        const upscaleData = await upscaleRes.json() as {
-          data: { url: string; width: number; height: number }[];
-        };
-        if (upscaleData.data?.[0]?.url) {
-          resultUrl = upscaleData.data[0].url;
-          width = upscaleData.data[0].width || width;
-          height = upscaleData.data[0].height || height;
-          this.logger.log(`Upscaled to ${width}x${height}`);
-        }
-      } else {
-        this.logger.warn(`Upscale failed: ${upscaleRes.status}, using original`);
+      if (!res.ok) {
+        this.logger.warn(`Poll attempt ${i + 1} failed: ${res.status}`);
+        continue;
       }
+
+      const data = await res.json() as {
+        data: { generated?: string[]; status?: string };
+      };
+
+      if (data.data?.status === 'COMPLETED' && data.data?.generated?.[0]) {
+        return data.data.generated[0];
+      }
+
+      if (data.data?.status === 'FAILED') {
+        throw new Error('AI task failed');
+      }
+
+      this.logger.log(`Poll ${i + 1}: status=${data.data?.status}`);
     }
 
-    this.logger.log(`AI enhance complete: ${width}x${height}`);
-    return { imageUrl: resultUrl, width, height, prompt };
+    throw new Error('AI task timed out');
   }
 }

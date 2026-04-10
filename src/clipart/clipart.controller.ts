@@ -44,6 +44,7 @@ export class ClipartController {
     return { url };
   }
 
+  @Public()
   @Post('ai-enhance')
   @ApiOperation({
     summary: 'AI-enhance a draft design using Freepik Reimagine',

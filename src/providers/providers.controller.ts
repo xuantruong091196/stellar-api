@@ -17,6 +17,7 @@ import {
   ApiParam,
 } from '@nestjs/swagger';
 import { ProvidersService } from './providers.service';
+import { Admin } from '../auth/decorators/admin.decorator';
 import {
   RegisterProviderDto,
   SearchProvidersDto,
@@ -57,6 +58,7 @@ export class ProvidersController {
   }
 
   @Patch(':providerId/verify')
+  @Admin()
   @ApiOperation({ summary: 'Verify a provider (admin)' })
   @ApiParam({ name: 'providerId', description: 'Provider UUID' })
   @ApiResponse({

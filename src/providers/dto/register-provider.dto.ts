@@ -6,6 +6,7 @@ import {
   IsInt,
   Min,
   Length,
+  Matches,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -33,9 +34,12 @@ export class RegisterProviderDto {
 
   @ApiProperty({
     example: 'GDKJ...XLMN',
-    description: 'Stellar blockchain address for payments',
+    description: 'Stellar blockchain address for payments (G... 56 chars)',
   })
   @IsString()
+  @Matches(/^G[A-Z2-7]{55}$/, {
+    message: 'stellarAddress must be a valid Stellar public key (56 characters starting with G)',
+  })
   stellarAddress: string;
 
   @ApiPropertyOptional({

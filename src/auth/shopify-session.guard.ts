@@ -8,6 +8,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { IS_PUBLIC_KEY } from './decorators/public.decorator';
+import { IS_ADMIN_KEY } from './decorators/admin.decorator';
 
 interface ShopifySessionPayload {
   iss: string;
@@ -41,29 +42,51 @@ export class ShopifySessionGuard implements CanActivate {
       return true;
     }
 
+    const isAdmin = this.reflector.getAllAndOverride<boolean>(IS_ADMIN_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
     const request = context.switchToHttp().getRequest();
 
-    // DEMO BYPASS: If X-Dev-Store header is set, upsert a demo store and
-    // attach it to the request. This allows the Stellar-wallet-only frontend
-    // to hit the API without a real Shopify session.
-    // TODO: replace with a proper Sign-In-With-Stellar guard that verifies
-    // the X-Wallet-Address header against an active server session.
-    const devStore = request.headers['x-dev-store'];
-    if (devStore) {
-      // Use the header value as the Store.id so that the frontend can keep
-      // sending the same literal "demo-store" to every endpoint that takes
-      // a storeId path param. Upserting on `id` also cleans up any previous
-      // UUID-based row from earlier builds.
+    // DEV-ONLY BYPASS: If X-Dev-Store header is set AND we're in development
+    // mode, upsert a demo store. In production this header is ignored.
+    if (process.env.NODE_ENV !== 'production') {
+      const devStore = request.headers['x-dev-store'];
+      if (devStore) {
+        const store = await this.prisma.store.upsert({
+          where: { id: devStore },
+          update: {},
+          create: {
+            id: devStore,
+            shopifyDomain: `${devStore}.myshopify.com`,
+            shopifyToken: 'dev-token',
+            name: `Dev Store (${devStore})`,
+            email: 'dev@stellarpod.local',
+            plan: 'dev',
+          },
+        });
+        request.store = store;
+        return true;
+      }
+    }
+
+    // Stellar wallet auth: X-Wallet-Address header from the SIWS-authenticated
+    // frontend. Look up (or create) a store tied to this wallet address.
+    const walletAddress = request.headers['x-wallet-address'];
+    if (walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('G') && walletAddress.length === 56) {
+      const storeId = `wallet-${walletAddress.slice(0, 16).toLowerCase()}`;
       const store = await this.prisma.store.upsert({
-        where: { id: devStore },
-        update: {},
+        where: { id: storeId },
+        update: { stellarAddress: walletAddress },
         create: {
-          id: devStore,
-          shopifyDomain: `${devStore}.myshopify.com`,
-          shopifyToken: 'dev-token',
-          name: `Dev Store (${devStore})`,
-          email: 'dev@stellarpod.local',
-          plan: 'dev',
+          id: storeId,
+          shopifyDomain: `${storeId}.stelo.life`,
+          shopifyToken: '',
+          name: `Stelo Store`,
+          email: `${walletAddress.slice(0, 8).toLowerCase()}@stelo.life`,
+          plan: 'free',
+          stellarAddress: walletAddress,
         },
       });
       request.store = store;
@@ -113,6 +136,11 @@ export class ShopifySessionGuard implements CanActivate {
     // Attach to request
     request.shopifySession = payload;
     request.store = store;
+
+    // Admin-only endpoints require store.plan === 'admin'
+    if (isAdmin && store.plan !== 'admin') {
+      throw new UnauthorizedException('Admin access required');
+    }
 
     return true;
   }

@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import rateLimit from 'express-rate-limit';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { readSecret } from './config/read-secret';
@@ -52,6 +53,18 @@ async function bootstrap() {
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
+
+  // Rate limiting — 100 requests per minute per IP (general),
+  // 10 requests per minute for auth-related endpoints.
+  app.use(
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 100,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { statusCode: 429, message: 'Too many requests, please try again later.' },
+    }),
+  );
 
   // Body parser limits
   // eslint-disable-next-line @typescript-eslint/no-require-imports

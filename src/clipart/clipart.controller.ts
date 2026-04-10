@@ -9,7 +9,7 @@ const FREEPIK_API_KEY = process.env.FREEPIK_API_KEY || '';
 @Controller('clipart')
 export class ClipartController {
   private readonly freepik = new FreepikSource(FREEPIK_API_KEY);
-  private readonly aiEnhance = new AiEnhanceService();
+  private readonly aiEnhanceService = new AiEnhanceService();
 
   @Get('search')
   @ApiOperation({ summary: 'Search clipart/icons from Freepik' })
@@ -60,6 +60,6 @@ export class ClipartController {
     if (!FREEPIK_API_KEY) {
       return { error: 'Freepik API key not configured' };
     }
-    return this.aiEnhance.enhance(dto);
+    return this.aiEnhanceService.enhance(dto);
   }
 }

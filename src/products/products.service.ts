@@ -129,15 +129,12 @@ export class ProductsService {
     }
 
     const store = product.store;
-    if (!store.shopifyToken) {
-      throw new BadRequestException('Store not connected to Shopify');
-    }
 
-    // Demo / dev mode: the store was auto-upserted by the dev bypass with
-    // shopifyToken='dev-token'. Skip the real Shopify API call, mark the
-    // product as published locally and synthesise a fake shopifyProductId
-    // so the UI behaves identically.
-    if (store.shopifyToken === 'dev-token' || store.plan === 'dev') {
+    // If store has no Shopify token (wallet-only stores or demo), skip
+    // the real Shopify API call and mark product as published locally.
+    // When the merchant later connects their Shopify store, products
+    // can be synced in bulk.
+    if (!store.shopifyToken || store.shopifyToken === 'dev-token' || store.plan === 'dev') {
       const fakeShopifyProductId = `demo-${merchantProductId.slice(0, 12)}`;
       const updated = await this.prisma.merchantProduct.update({
         where: { id: merchantProductId },

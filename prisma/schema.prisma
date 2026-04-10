@@ -72,6 +72,16 @@ model Provider {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  // External provider integration
+  integrationType   String?   // 'printful' | 'printify' | 'gooten' | 'manual'
+  externalId        String?   // Provider's own merchant/shop ID
+  apiToken          String?   // Encrypted API token for the external service
+  apiSecret         String?   // Encrypted API secret (if needed)
+  webhookSecret     String?   // For verifying incoming webhooks
+  integrationStatus String?   @default("pending") // pending | active | paused | error
+  lastSyncedAt      DateTime?
+  syncError         String?
+
   orders           Order[]
   escrows          Escrow[]
   storeProviders   StoreProvider[]
@@ -303,6 +313,11 @@ model ProviderProduct {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  // External provider mapping
+  externalProductId String?   // Provider API's product ID (e.g. Printful product_id)
+  externalCatalogId String?   // Provider catalog ID for ordering
+  syncedAt          DateTime?
+
   provider         Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   variants         ProviderProductVariant[]
   merchantProducts MerchantProduct[]
@@ -321,6 +336,8 @@ model ProviderProductVariant {
   sku               String  // Provider's internal SKU
   additionalCost    Float   @default(0) // Extra cost for 2XL+ sizes
   inStock           Boolean @default(true)
+
+  externalVariantId String?  // Provider API's variant ID
 
   providerProduct   ProviderProduct @relation(fields: [providerProductId], references: [id], onDelete: Cascade)
 
@@ -345,6 +362,12 @@ model ProviderOrder {
   designFileUrls  Json?    // URLs of print-ready files for this sub-order
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  // External provider mapping
+  externalOrderId String?   // Provider API's order ID
+  externalOrderUrl String?  // Link to provider dashboard
+  submittedAt     DateTime?
+  submissionError String?
 
   order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   provider        Provider @relation(fields: [providerId], references: [id])

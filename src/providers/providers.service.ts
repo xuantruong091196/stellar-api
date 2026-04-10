@@ -6,12 +6,16 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { ProviderAdapterFactory } from './integrations/provider-adapter.factory';
 
 @Injectable()
 export class ProvidersService {
   private readonly logger = new Logger(ProvidersService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly adapterFactory: ProviderAdapterFactory,
+  ) {}
 
   /**
    * Register a new print provider.
@@ -277,5 +281,130 @@ export class ProvidersService {
 
     this.logger.log(`Provider ${providerId} updated`);
     return updated;
+  }
+
+  /**
+   * Setup external integration for a provider (Printful, Printify, Gooten).
+   */
+  async setupIntegration(
+    providerId: string,
+    integrationType: string,
+    apiToken: string,
+    apiSecret?: string,
+  ) {
+    const provider = await this.prisma.provider.findUnique({ where: { id: providerId } });
+    if (!provider) throw new NotFoundException(`Provider ${providerId} not found`);
+
+    // Validate credentials
+    const adapter = this.adapterFactory.getAdapter(integrationType, apiToken, apiSecret);
+    const { valid, error } = await adapter.validateCredentials();
+    if (!valid) {
+      throw new BadRequestException(`Invalid credentials for ${integrationType}: ${error}`);
+    }
+
+    const updated = await this.prisma.provider.update({
+      where: { id: providerId },
+      data: {
+        integrationType,
+        apiToken,
+        apiSecret: apiSecret || null,
+        integrationStatus: 'active',
+      },
+    });
+
+    this.logger.log(`Provider ${providerId} integration set up: ${integrationType}`);
+    return updated;
+  }
+
+  /**
+   * Sync product catalog from external provider API into our DB.
+   */
+  async syncCatalog(providerId: string) {
+    const provider = await this.prisma.provider.findUnique({ where: { id: providerId } });
+    if (!provider) throw new NotFoundException(`Provider ${providerId} not found`);
+    if (!provider.integrationType || !provider.apiToken) {
+      throw new BadRequestException('Provider has no integration configured');
+    }
+
+    const adapter = this.adapterFactory.getAdapter(
+      provider.integrationType,
+      provider.apiToken,
+      provider.apiSecret || undefined,
+    );
+
+    this.logger.log(`Syncing catalog from ${provider.integrationType} for provider ${providerId}...`);
+    const products = await adapter.syncCatalog();
+
+    let created = 0;
+    let updated = 0;
+
+    for (const p of products) {
+      const existing = await this.prisma.providerProduct.findFirst({
+        where: { providerId, externalProductId: p.externalProductId },
+      });
+
+      if (existing) {
+        await this.prisma.providerProduct.update({
+          where: { id: existing.id },
+          data: {
+            name: p.name,
+            brand: p.brand,
+            description: p.description,
+            baseCost: p.baseCost,
+            blankImages: p.blankImages,
+            printAreas: p.printAreas,
+            weightGrams: p.weightGrams,
+            productionDays: p.productionDays,
+            syncedAt: new Date(),
+          },
+        });
+        updated++;
+      } else {
+        const created_ = await this.prisma.providerProduct.create({
+          data: {
+            providerId,
+            externalProductId: p.externalProductId,
+            externalCatalogId: p.externalProductId,
+            productType: p.productType,
+            name: p.name,
+            brand: p.brand,
+            description: p.description,
+            baseCost: p.baseCost,
+            blankImages: p.blankImages,
+            printAreas: p.printAreas,
+            weightGrams: p.weightGrams,
+            productionDays: p.productionDays,
+            syncedAt: new Date(),
+          },
+        });
+
+        // Create variants
+        for (const v of p.variants) {
+          await this.prisma.providerProductVariant.create({
+            data: {
+              providerProductId: created_.id,
+              externalVariantId: v.externalVariantId,
+              size: v.size,
+              color: v.color,
+              colorHex: v.colorHex,
+              sku: v.sku,
+              additionalCost: v.additionalCost,
+              inStock: v.inStock,
+            },
+          });
+        }
+        created++;
+      }
+    }
+
+    await this.prisma.provider.update({
+      where: { id: providerId },
+      data: { lastSyncedAt: new Date(), syncError: null },
+    });
+
+    this.logger.log(
+      `Catalog sync complete for ${providerId}: ${created} created, ${updated} updated`,
+    );
+    return { created, updated, total: products.length };
   }
 }

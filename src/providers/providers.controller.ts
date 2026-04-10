@@ -228,4 +228,28 @@ export class ProvidersController {
   async getProvider(@Param('providerId') providerId: string) {
     return this.providersService.getProvider(providerId);
   }
+
+  @Post(':providerId/integration')
+  @Admin()
+  @ApiOperation({ summary: 'Setup external provider integration (admin)' })
+  @ApiParam({ name: 'providerId' })
+  async setupIntegration(
+    @Param('providerId') providerId: string,
+    @Body() dto: { integrationType: string; apiToken: string; apiSecret?: string },
+  ) {
+    return this.providersService.setupIntegration(
+      providerId,
+      dto.integrationType,
+      dto.apiToken,
+      dto.apiSecret,
+    );
+  }
+
+  @Post(':providerId/sync-catalog')
+  @Admin()
+  @ApiOperation({ summary: 'Sync product catalog from external provider (admin)' })
+  @ApiParam({ name: 'providerId' })
+  async syncCatalog(@Param('providerId') providerId: string) {
+    return this.providersService.syncCatalog(providerId);
+  }
 }

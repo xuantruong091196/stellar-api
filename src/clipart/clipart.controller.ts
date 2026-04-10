@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Query, Param, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { Public } from '../auth/decorators/public.decorator';
 import { FreepikSource } from './freepik.source';
 import { AiEnhanceService } from './ai-enhance.service';
 
@@ -11,6 +12,7 @@ export class ClipartController {
   private readonly freepik = new FreepikSource(FREEPIK_API_KEY);
   private readonly aiEnhanceService = new AiEnhanceService();
 
+  @Public()
   @Get('search')
   @ApiOperation({ summary: 'Search clipart/icons from Freepik' })
   @ApiQuery({ name: 'q', required: true })
@@ -31,6 +33,7 @@ export class ClipartController {
     );
   }
 
+  @Public()
   @Get('download/:id')
   @ApiOperation({ summary: 'Get download URL for a clipart item' })
   async download(@Param('id') id: string) {

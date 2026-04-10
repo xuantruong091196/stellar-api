@@ -19,6 +19,7 @@ import { ProviderOrdersModule } from './provider-orders/provider-orders.module';
 import { ProviderAuthModule } from './provider-auth/provider-auth.module';
 import { PricingModule } from './pricing/pricing.module';
 import { ShippingModule } from './shipping/shipping.module';
+import { ClipartModule } from './clipart/clipart.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { ShippingModule } from './shipping/shipping.module';
     ProviderAuthModule,
     PricingModule,
     ShippingModule,
+    ClipartModule,
   ],
   providers: [
     {

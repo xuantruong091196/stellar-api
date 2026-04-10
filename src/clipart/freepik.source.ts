@@ -14,14 +14,12 @@ export class FreepikSource implements IClipartSource {
     page = 1,
     limit = 20,
   ): Promise<ClipartSearchResult> {
-    const params = new URLSearchParams({
-      term: query,
-      page: String(page),
-      limit: String(limit),
-      filters: JSON.stringify({
-        content_type: ['vector', 'icon'],
-      }),
-    });
+    const params = new URLSearchParams();
+    params.set('term', query);
+    params.set('page', String(page));
+    params.set('limit', String(limit));
+    params.append('filters[content_type][]', 'vector');
+    params.append('filters[content_type][]', 'icon');
 
     const res = await fetch(`${BASE_URL}/resources?${params.toString()}`, {
       headers: {

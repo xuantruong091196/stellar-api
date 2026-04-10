@@ -45,10 +45,20 @@ export class PrintfulAdapter implements IProviderAdapter {
   }
 
   async syncCatalog(): Promise<CatalogProduct[]> {
-    // Printful catalog: GET /catalog/products → list of product types
-    // Then GET /catalog/products/{id} for details + variants
-    const products: { id: number; type: string; title: string; brand: string; image: string }[] =
-      await this.request('/catalog/products');
+    // Printful catalog is public — fetch without auth to avoid store-scoped errors
+    const catalogRes = await fetch(`${BASE_URL}/catalog/products`, {
+      headers: { Authorization: `Bearer ${this.apiToken}` },
+    });
+    if (!catalogRes.ok) {
+      // Fallback: try without auth (public catalog)
+      const publicRes = await fetch(`${BASE_URL}/catalog/products`);
+      if (!publicRes.ok) throw new Error(`Printful catalog fetch failed: ${publicRes.status}`);
+      const pub = await publicRes.json();
+      var products = (pub as { result: any[] }).result || [];
+    } else {
+      const data = await catalogRes.json();
+      var products = (data as { result: any[] }).result || [];
+    }
 
     // Limit to popular POD categories
     const podTypes = ['T-SHIRT', 'HOODIE', 'MUG', 'POSTER', 'TOTE', 'PHONE_CASE'];

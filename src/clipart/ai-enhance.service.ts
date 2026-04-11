@@ -81,8 +81,22 @@ export class AiEnhanceService {
       throw new Error('AI returned no image');
     }
 
-    this.logger.log(`AI enhance complete: ${imageUrl.substring(0, 80)}...`);
-    return { imageUrl, width: 0, height: 0, prompt };
+    // Proxy image through backend to avoid CORS issues with GCS signed URLs
+    const proxiedUrl = await this.proxyImageToBase64(imageUrl);
+
+    this.logger.log(`AI enhance complete, proxied to data URL (${proxiedUrl.length} chars)`);
+    return { imageUrl: proxiedUrl, width: 0, height: 0, prompt };
+  }
+
+  private async proxyImageToBase64(url: string): Promise<string> {
+    const res = await fetch(url);
+    if (!res.ok) {
+      this.logger.warn(`Failed to proxy image: ${res.status}`);
+      return url; // fallback to original URL
+    }
+    const contentType = res.headers.get('content-type') || 'image/jpeg';
+    const buffer = Buffer.from(await res.arrayBuffer());
+    return `data:${contentType};base64,${buffer.toString('base64')}`;
   }
 
   private async pollTask(taskId: string, maxAttempts = 30): Promise<string> {

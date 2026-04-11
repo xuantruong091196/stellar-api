@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Delete, Param, Body, Query, HttpCode, HttpStatus,
+  Controller, Get, Post, Delete, Param, Body, Query, Req, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiParam, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import { ProductsService } from './products.service';
@@ -33,15 +33,17 @@ export class ProductsController {
   })
   @ApiParam({ name: 'productId', description: 'Merchant product ID (not Shopify ID)' })
   @ApiResponse({ status: 200, description: 'Product published with Shopify product ID' })
-  async publish(@Param('productId') productId: string) {
-    return this.productsService.publishToShopify(productId);
+  async publish(@Param('productId') productId: string, @Req() req: any) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.productsService.publishToShopify(productId, callerStoreId);
   }
 
   @Post(':productId/unpublish')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remove product from Shopify (keep in StellarPOD)' })
-  async unpublish(@Param('productId') productId: string) {
-    return this.productsService.unpublish(productId);
+  async unpublish(@Param('productId') productId: string, @Req() req: any) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.productsService.unpublish(productId, callerStoreId);
   }
 
   @Get('store/:storeId')
@@ -66,8 +68,9 @@ export class ProductsController {
 
   @Delete(':productId')
   @ApiOperation({ summary: 'Delete product (also removes from Shopify if published)' })
-  async deleteProduct(@Param('productId') productId: string) {
-    return this.productsService.deleteProduct(productId);
+  async deleteProduct(@Param('productId') productId: string, @Req() req: any) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.productsService.deleteProduct(productId, callerStoreId);
   }
 
   @Get('pricing/calculate')

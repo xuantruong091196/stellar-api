@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrderStatus, EscrowStatus } from '../../generated/prisma';
 
@@ -11,7 +12,10 @@ import { OrderStatus, EscrowStatus } from '../../generated/prisma';
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
 
   /**
    * Create an order from a Shopify webhook payload (orders/create).
@@ -123,7 +127,7 @@ export class OrdersService {
     const [orders, total] = await Promise.all([
       this.prisma.order.findMany({
         where,
-        include: { items: true, escrow: true },
+        include: { items: true, escrows: true },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
@@ -148,7 +152,7 @@ export class OrdersService {
   async getOrder(orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { items: true, escrow: true, store: true },
+      include: { items: true, escrows: true, store: true },
     });
 
     if (!order) {
@@ -249,7 +253,7 @@ export class OrdersService {
   async cancelOrder(orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { escrow: true },
+      include: { escrows: true },
     });
 
     if (!order) {
@@ -270,29 +274,31 @@ export class OrdersService {
       );
     }
 
-    // If there is a locked escrow, mark it for refund
-    const escrowUpdate =
-      order.escrow && order.escrow.status === EscrowStatus.LOCKED
-        ? this.prisma.escrow.update({
-            where: { id: order.escrow.id },
-            data: { status: EscrowStatus.REFUNDED },
-          })
-        : undefined;
+    // Refund all locked escrows for this order
+    const lockedEscrows = order.escrows.filter(
+      (e) => e.status === EscrowStatus.LOCKED,
+    );
+    const escrowUpdates = lockedEscrows.map((e) =>
+      this.prisma.escrow.update({
+        where: { id: e.id },
+        data: { status: EscrowStatus.REFUNDED },
+      }),
+    );
 
     const orderUpdate = this.prisma.order.update({
       where: { id: orderId },
       data: { status: OrderStatus.CANCELLED },
-      include: { items: true, escrow: true },
+      include: { items: true, escrows: true },
     });
 
-    if (escrowUpdate) {
+    if (escrowUpdates.length > 0) {
       const [updatedOrder] = await this.prisma.$transaction([
         orderUpdate,
-        escrowUpdate,
+        ...escrowUpdates,
       ]);
 
       this.logger.log(
-        `Order ${orderId} cancelled with escrow refund initiated`,
+        `Order ${orderId} cancelled with ${escrowUpdates.length} escrow(s) refund initiated`,
       );
 
       return updatedOrder;
@@ -316,7 +322,24 @@ export class OrdersService {
     const lineItems =
       (payload.line_items as Array<Record<string, unknown>>) || [];
 
-    // Group items by provider via MerchantProduct lookup
+    // Batch lookup: collect all shopifyProductIds, then findMany in one query
+    const shopifyProductIds = lineItems
+      .map((item) => (item.product_id ? String(item.product_id) : null))
+      .filter((id): id is string => id !== null);
+
+    const merchantProducts = shopifyProductIds.length > 0
+      ? await this.prisma.merchantProduct.findMany({
+          where: { storeId, shopifyProductId: { in: shopifyProductIds } },
+          include: { providerProduct: true, design: true },
+        })
+      : [];
+
+    // Index by shopifyProductId for O(1) lookup
+    const mpByShopifyId = new Map(
+      merchantProducts.map((mp) => [mp.shopifyProductId, mp]),
+    );
+
+    // Group items by provider
     const providerGroups = new Map<
       string,
       { baseCostTotal: number; designFileUrls: string[] }
@@ -334,13 +357,7 @@ export class OrdersService {
         continue;
       }
 
-      const merchantProduct = await this.prisma.merchantProduct.findFirst({
-        where: { storeId, shopifyProductId },
-        include: {
-          providerProduct: true,
-          design: true,
-        },
-      });
+      const merchantProduct = mpByShopifyId.get(shopifyProductId);
 
       if (!merchantProduct) {
         this.logger.warn(
@@ -375,7 +392,7 @@ export class OrdersService {
     }
 
     // Create a ProviderOrder per provider group
-    const platformFeeRate = 0.05;
+    const platformFeeRate = this.config.get<number>('pricing.platformFeeRate') || 0.05;
 
     for (const [providerId, group] of providerGroups) {
       const platformFee = group.baseCostTotal * platformFeeRate;

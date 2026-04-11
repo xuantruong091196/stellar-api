@@ -6,6 +6,7 @@ import {
   Param,
   Query,
   Body,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -54,8 +55,10 @@ export class ProviderOrdersController {
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: UpdateProviderOrderStatusDto,
+    @Req() req: any,
   ) {
-    return this.providerOrdersService.updateStatus(id, dto.status);
+    const callerProviderId = req.providerId;
+    return this.providerOrdersService.updateStatus(id, dto.status, callerProviderId);
   }
 
   @Post(':id/tracking')
@@ -69,10 +72,13 @@ export class ProviderOrdersController {
   async submitTracking(
     @Param('id') id: string,
     @Body() dto: SubmitTrackingDto,
+    @Req() req: any,
   ) {
+    const callerProviderId = req.providerId;
     return this.providerOrdersService.submitTracking(
       id,
       dto.trackingNumber,
+      callerProviderId,
       dto.trackingUrl,
       dto.company,
     );

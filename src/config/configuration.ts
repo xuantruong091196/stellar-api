@@ -20,6 +20,11 @@ export default () => ({
       process.env.STELLAR_HORIZON_URL ||
       'https://horizon-testnet.stellar.org',
     systemSecretKey: readSecret('SYSTEM_STELLAR_SECRET_KEY'),
+    escrowSecretKey: readSecret('ESCROW_STELLAR_SECRET_KEY'),
+    treasurySecretKey: readSecret('TREASURY_STELLAR_SECRET_KEY'),
+    usdcIssuer:
+      process.env.USDC_ISSUER ||
+      'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
   },
 
   shopify: {
@@ -30,6 +35,14 @@ export default () => ({
 
   encryption: {
     key: process.env.ENCRYPTION_KEY,
+  },
+
+  easypost: {
+    apiKey: readSecret('EASYPOST_API_KEY'),
+  },
+
+  admin: {
+    apiKey: readSecret('ADMIN_API_KEY'),
   },
 
   pricing: {

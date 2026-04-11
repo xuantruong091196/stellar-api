@@ -24,6 +24,7 @@ enum OrderStatus {
 
 enum EscrowStatus {
   LOCKING
+  LOCK_FAILED
   LOCKED
   RELEASING
   RELEASED
@@ -165,7 +166,7 @@ model Order {
   store          Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
   provider       Provider?       @relation(fields: [providerId], references: [id], onDelete: SetNull)
   items          OrderItem[]
-  escrow         Escrow?
+  escrows        Escrow[]
   providerOrders ProviderOrder[]
 
   @@unique([storeId, shopifyOrderId])
@@ -191,10 +192,10 @@ model OrderItem {
 
 model Escrow {
   id               String       @id @default(uuid())
-  orderId          String       @unique
+  orderId          String
   storeId          String
   providerId       String?
-  providerOrderId  String?
+  providerOrderId  String?      @unique
   status           EscrowStatus @default(LOCKING)
   contractId     String?
   lockTxHash     String?
@@ -206,6 +207,7 @@ model Escrow {
   lockedAt       DateTime?
   releasedAt     DateTime?
   expiresAt      DateTime
+  retryCount     Int          @default(0)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -214,9 +216,11 @@ model Escrow {
   provider Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
   disputes Dispute[]
 
+  @@index([orderId])
   @@index([storeId])
   @@index([status])
   @@index([providerId])
+  @@index([expiresAt])
 }
 
 model Dispute {

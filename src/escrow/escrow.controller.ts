@@ -5,6 +5,7 @@ import {
   Param,
   Body,
   Query,
+  Req,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -16,11 +17,15 @@ import { EscrowService } from './escrow.service';
 export class EscrowController {
   constructor(private readonly escrowService: EscrowService) {}
 
-  @Post('lock/:orderId')
-  @ApiOperation({ summary: 'Lock funds in escrow for an order' })
-  @ApiParam({ name: 'orderId', description: 'Order ID' })
-  async lockEscrow(@Param('orderId') orderId: string) {
-    return this.escrowService.lockEscrow(orderId);
+  @Post('lock/:providerOrderId')
+  @ApiOperation({ summary: 'Lock funds in escrow for a provider order' })
+  @ApiParam({ name: 'providerOrderId', description: 'Provider Order ID' })
+  async lockEscrow(
+    @Param('providerOrderId') providerOrderId: string,
+    @Req() req: any,
+  ) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.escrowService.lockEscrow(providerOrderId, callerStoreId);
   }
 
   @Post(':escrowId/confirm')
@@ -29,22 +34,43 @@ export class EscrowController {
   async confirmLock(
     @Param('escrowId') escrowId: string,
     @Body('signedXdr') signedXdr: string,
+    @Req() req: any,
   ) {
-    return this.escrowService.confirmLock(escrowId, signedXdr);
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.escrowService.confirmLock(escrowId, signedXdr, callerStoreId);
+  }
+
+  @Post(':escrowId/retry-lock')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Retry a failed escrow lock' })
+  async retryLock(
+    @Param('escrowId') escrowId: string,
+    @Req() req: any,
+  ) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.escrowService.retryLock(escrowId, callerStoreId);
   }
 
   @Post(':escrowId/release')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Release escrowed funds to provider' })
-  async releaseEscrow(@Param('escrowId') escrowId: string) {
-    return this.escrowService.releaseEscrow(escrowId);
+  async releaseEscrow(
+    @Param('escrowId') escrowId: string,
+    @Req() req: any,
+  ) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.escrowService.releaseEscrow(escrowId, callerStoreId);
   }
 
   @Post(':escrowId/refund')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refund escrowed funds to merchant' })
-  async refundEscrow(@Param('escrowId') escrowId: string) {
-    return this.escrowService.refundEscrow(escrowId);
+  async refundEscrow(
+    @Param('escrowId') escrowId: string,
+    @Req() req: any,
+  ) {
+    const callerStoreId = req.storeId || req.body?.storeId;
+    return this.escrowService.refundEscrow(escrowId, callerStoreId);
   }
 
   @Get(':escrowId')
@@ -54,9 +80,9 @@ export class EscrowController {
   }
 
   @Get('order/:orderId')
-  @ApiOperation({ summary: 'Get escrow by order ID' })
-  async getEscrowByOrder(@Param('orderId') orderId: string) {
-    return this.escrowService.getEscrowByOrderId(orderId);
+  @ApiOperation({ summary: 'Get escrows by order ID' })
+  async getEscrowsByOrder(@Param('orderId') orderId: string) {
+    return this.escrowService.getEscrowsByOrderId(orderId);
   }
 
   @Post(':escrowId/dispute')
@@ -64,12 +90,23 @@ export class EscrowController {
   @ApiOperation({ summary: 'Raise a dispute on an escrow' })
   async raiseDispute(
     @Param('escrowId') escrowId: string,
-    @Body() body: { raisedBy: 'merchant' | 'provider'; reason: string; evidence?: Record<string, unknown> },
+    @Body() body: {
+      raisedBy: 'merchant' | 'provider';
+      reason: string;
+      storeId?: string;
+      providerId?: string;
+      evidence?: Record<string, unknown>;
+    },
+    @Req() req: any,
   ) {
+    const callerStoreId = req.storeId || body.storeId;
+    const callerProviderId = req.providerId || body.providerId;
     return this.escrowService.raiseDispute(
       escrowId,
       body.raisedBy,
       body.reason,
+      callerStoreId,
+      callerProviderId,
       body.evidence,
     );
   }

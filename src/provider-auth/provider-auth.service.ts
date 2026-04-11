@@ -6,7 +6,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SignJWT, jwtVerify } from 'jose';
 import { PrismaService } from '../prisma/prisma.service';
+
+/**
+ * Deployment timestamp used to enforce the 7-day grace period for
+ * legacy (v1) token verification. After this window only jose-signed
+ * tokens (v2) are accepted.
+ */
+const DEPLOYMENT_TIMESTAMP = Date.now();
+const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 @Injectable()
 export class ProviderAuthService {
@@ -16,6 +25,10 @@ export class ProviderAuthService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // Password helpers (scrypt – unchanged)
+  // ---------------------------------------------------------------------------
 
   /**
    * Hash a password using scrypt + random salt.
@@ -38,45 +51,60 @@ export class ProviderAuthService {
     );
   }
 
-  /**
-   * Generate a simple JWT (header.payload.signature) using HMAC-SHA256.
-   */
-  private generateJwt(payload: Record<string, unknown>): string {
-    const secret = this.config.get<string>('providerAuth.jwtSecret')!;
-    const expiresIn = this.config.get<string>('providerAuth.jwtExpiresIn')!;
+  // ---------------------------------------------------------------------------
+  // JWT helpers
+  // ---------------------------------------------------------------------------
 
-    // Parse expiry duration
-    const nowSec = Math.floor(Date.now() / 1000);
-    let expSec = nowSec + 86400; // default 24h
+  /**
+   * Encode the JWT secret as a Uint8Array suitable for jose.
+   */
+  private getSecretKey(): Uint8Array {
+    const secret = this.config.get<string>('providerAuth.jwtSecret')!;
+    return new TextEncoder().encode(secret);
+  }
+
+  /**
+   * Parse the configured expiry string (e.g. "24h", "7d", "30m") into seconds.
+   */
+  private getExpirySeconds(): number {
+    const expiresIn = this.config.get<string>('providerAuth.jwtExpiresIn')!;
     const match = expiresIn.match(/^(\d+)(h|d|m)$/);
     if (match) {
       const val = parseInt(match[1], 10);
       const unit = match[2];
-      if (unit === 'h') expSec = nowSec + val * 3600;
-      else if (unit === 'd') expSec = nowSec + val * 86400;
-      else if (unit === 'm') expSec = nowSec + val * 60;
+      if (unit === 'h') return val * 3600;
+      if (unit === 'd') return val * 86400;
+      if (unit === 'm') return val * 60;
     }
-
-    const header = { alg: 'HS256', typ: 'JWT' };
-    const body = { ...payload, iat: nowSec, exp: expSec };
-
-    const encHeader = Buffer.from(JSON.stringify(header))
-      .toString('base64url');
-    const encPayload = Buffer.from(JSON.stringify(body))
-      .toString('base64url');
-
-    const signature = crypto
-      .createHmac('sha256', secret)
-      .update(`${encHeader}.${encPayload}`)
-      .digest('base64url');
-
-    return `${encHeader}.${encPayload}.${signature}`;
+    return 86400; // default 24 h
   }
 
   /**
-   * Verify a JWT and return the decoded payload.
+   * Generate a JWT using jose's SignJWT.
+   * New tokens include a `v: 2` claim so they can be distinguished from
+   * legacy hand-rolled tokens.
    */
-  verifyJwt(token: string): Record<string, unknown> | null {
+  private async generateJwt(
+    payload: Record<string, unknown>,
+  ): Promise<string> {
+    const expSec = this.getExpirySeconds();
+
+    return new SignJWT({ ...payload, v: 2 })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setIssuedAt()
+      .setExpirationTime(`${expSec}s`)
+      .sign(this.getSecretKey());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Legacy (v1) verification – kept for grace-period fallback
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Verify a legacy hand-rolled HMAC-SHA256 JWT.
+   * Only used during the 7-day grace window after deployment.
+   */
+  private verifyLegacyJwt(token: string): Record<string, unknown> | null {
     try {
       const secret = this.config.get<string>('providerAuth.jwtSecret')!;
       const parts = token.split('.');
@@ -114,6 +142,48 @@ export class ProviderAuthService {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Public verification (dual: jose first, legacy fallback)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Verify a JWT and return the decoded payload.
+   *
+   * Strategy:
+   *  1. Try jose `jwtVerify` first.
+   *  2. If that fails AND we are still inside the 7-day grace period,
+   *     fall back to the legacy HMAC verification so that v1 tokens
+   *     issued before this deployment remain valid.
+   */
+  async verifyJwt(token: string): Promise<Record<string, unknown> | null> {
+    // --- Attempt 1: jose ---
+    try {
+      const { payload } = await jwtVerify(token, this.getSecretKey(), {
+        algorithms: ['HS256'],
+      });
+      return payload as Record<string, unknown>;
+    } catch {
+      // jose verification failed – fall through
+    }
+
+    // --- Attempt 2: legacy fallback (only during grace period) ---
+    const withinGracePeriod =
+      Date.now() - DEPLOYMENT_TIMESTAMP < GRACE_PERIOD_MS;
+
+    if (withinGracePeriod) {
+      this.logger.warn(
+        'jose verification failed; attempting legacy JWT verification (grace period)',
+      );
+      return this.verifyLegacyJwt(token);
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Registration
+  // ---------------------------------------------------------------------------
+
   /**
    * Register a new provider with email/password.
    */
@@ -149,7 +219,7 @@ export class ProviderAuthService {
 
     this.logger.log(`Provider registered: ${provider.id} (${provider.name})`);
 
-    const token = this.generateJwt({
+    const token = await this.generateJwt({
       sub: provider.id,
       email: provider.contactEmail,
       type: 'provider',
@@ -165,6 +235,10 @@ export class ProviderAuthService {
       token,
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // Login
+  // ---------------------------------------------------------------------------
 
   /**
    * Login with email/password, return JWT.
@@ -189,7 +263,7 @@ export class ProviderAuthService {
       data: { lastLoginAt: new Date() },
     });
 
-    const token = this.generateJwt({
+    const token = await this.generateJwt({
       sub: provider.id,
       email: provider.contactEmail,
       type: 'provider',
@@ -207,6 +281,10 @@ export class ProviderAuthService {
       token,
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // API key helpers (unchanged)
+  // ---------------------------------------------------------------------------
 
   /**
    * Generate a random API key for programmatic access.

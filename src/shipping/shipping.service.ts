@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import EasyPostClient from '@easypost/api';
 
 interface ShippingItem {
   weightGrams: number;
@@ -12,6 +14,32 @@ interface ShippingRate {
   currency: string;
   minDays: number;
   maxDays: number;
+}
+
+interface ShopifyCarrierRate {
+  service_name: string;
+  service_code: string;
+  total_price: number; // cents
+  currency: string;
+  description: string;
+}
+
+interface AddressInput {
+  name?: string;
+  street1: string;
+  street2?: string;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+  phone?: string;
+}
+
+interface ParcelInput {
+  length: number;
+  width: number;
+  height: number;
+  weight: number; // oz
 }
 
 // Continent mapping for zone-based rates
@@ -31,19 +59,101 @@ const COUNTRY_CONTINENT: Record<string, string> = {
   ZA: 'AF', NG: 'AF', KE: 'AF', EG: 'AF',
 };
 
+const EASYPOST_TIMEOUT_MS = 5000;
+
 @Injectable()
 export class ShippingService {
   private readonly logger = new Logger(ShippingService.name);
+  private readonly easyPostClient: InstanceType<typeof EasyPostClient> | null;
+
+  constructor(private readonly configService: ConfigService) {
+    const apiKey = this.configService.get<string>('easypost.apiKey');
+    this.easyPostClient = apiKey ? new EasyPostClient(apiKey) : null;
+  }
 
   /**
-   * Calculate shipping rates based on zone-based rate table.
+   * Calculate shipping rates. Tries EasyPost first (with 5s timeout),
+   * falls back to flat-rate zone-based calculation on failure.
    */
-  calculateShippingRates(
+  async calculateShippingRates(
+    providerCountry: string,
+    destinationCountry: string,
+    destinationZip: string,
+    items: ShippingItem[],
+    fromAddress?: AddressInput,
+    toAddress?: AddressInput,
+    parcel?: ParcelInput,
+  ): Promise<ShopifyCarrierRate[]> {
+    // Attempt EasyPost if client is configured and address/parcel data is provided
+    if (this.easyPostClient && fromAddress && toAddress && parcel) {
+      try {
+        const rates = await this.fetchEasyPostRates(
+          fromAddress,
+          toAddress,
+          parcel,
+        );
+        if (rates.length > 0) {
+          return rates;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `EasyPost rate fetch failed, falling back to flat-rate calculation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    // Fallback: flat-rate zone-based calculation
+    return this.calculateFlatRates(
+      providerCountry,
+      destinationCountry,
+      destinationZip,
+      items,
+    );
+  }
+
+  /**
+   * Fetch rates from EasyPost with a timeout.
+   */
+  private async fetchEasyPostRates(
+    fromAddress: AddressInput,
+    toAddress: AddressInput,
+    parcel: ParcelInput,
+  ): Promise<ShopifyCarrierRate[]> {
+    const shipmentPromise = this.easyPostClient!.Shipment.create({
+      from_address: fromAddress,
+      to_address: toAddress,
+      parcel,
+    });
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error('EasyPost request timed out')),
+        EASYPOST_TIMEOUT_MS,
+      ),
+    );
+
+    const shipment = await Promise.race([shipmentPromise, timeoutPromise]);
+
+    return (shipment.rates || []).map((rate: any) => ({
+      service_name: rate.service,
+      service_code: `${rate.carrier}_${rate.service}`.toLowerCase().replace(/\s+/g, '_'),
+      total_price: Math.round(parseFloat(rate.rate) * 100),
+      currency: rate.currency || 'USD',
+      description: `${rate.carrier} ${rate.service} - estimated ${rate.delivery_days ?? 'N/A'} day(s)`,
+    }));
+  }
+
+  /**
+   * Flat-rate zone-based calculation (fallback).
+   */
+  private calculateFlatRates(
     providerCountry: string,
     destinationCountry: string,
     _destinationZip: string,
     items: ShippingItem[],
-  ): ShippingRate[] {
+  ): ShopifyCarrierRate[] {
     const zone = this.getShippingZone(providerCountry, destinationCountry);
 
     // Base rates by zone
@@ -79,20 +189,22 @@ export class ShippingService {
 
     return [
       {
-        serviceName: 'Standard Shipping',
-        serviceCode: 'standard',
-        price: this.round(rates.standard.price + surchargeTotal),
+        service_name: 'Standard Shipping',
+        service_code: 'standard',
+        total_price: Math.round(
+          this.round(rates.standard.price + surchargeTotal) * 100,
+        ),
         currency: 'USD',
-        minDays: rates.standard.minDays,
-        maxDays: rates.standard.maxDays,
+        description: `Standard Shipping (${rates.standard.minDays}-${rates.standard.maxDays} business days)`,
       },
       {
-        serviceName: 'Express Shipping',
-        serviceCode: 'express',
-        price: this.round(rates.express.price + surchargeTotal),
+        service_name: 'Express Shipping',
+        service_code: 'express',
+        total_price: Math.round(
+          this.round(rates.express.price + surchargeTotal) * 100,
+        ),
         currency: 'USD',
-        minDays: rates.express.minDays,
-        maxDays: rates.express.maxDays,
+        description: `Express Shipping (${rates.express.minDays}-${rates.express.maxDays} business days)`,
       },
     ];
   }

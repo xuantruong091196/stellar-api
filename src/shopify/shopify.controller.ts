@@ -180,6 +180,8 @@ export class ShopifyController {
         where: { id: webhookLog.id },
         data: { error: errorMessage },
       });
+      // Return 500 so Shopify retries (up to 19 times over 48 hours)
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send();
     }
 
     return res.status(HttpStatus.OK).send();
@@ -224,7 +226,7 @@ export class ShopifyController {
       where: {
         storeId_shopifyOrderId: { storeId, shopifyOrderId },
       },
-      include: { escrow: true },
+      include: { escrows: true },
     });
 
     if (!order) {
@@ -239,14 +241,17 @@ export class ShopifyController {
       data: { status: OrderStatus.REFUNDED },
     });
 
-    // If there is a locked escrow, mark it for refund
-    if (order.escrow && order.escrow.status === 'LOCKED') {
+    // Refund all locked escrows for this order
+    const lockedEscrows = order.escrows.filter(
+      (e) => e.status === 'LOCKED',
+    );
+    for (const escrow of lockedEscrows) {
       await this.prisma.escrow.update({
-        where: { id: order.escrow.id },
+        where: { id: escrow.id },
         data: { status: 'REFUNDED' },
       });
       this.logger.log(
-        `Escrow ${order.escrow.id} marked for refund due to Shopify refund`,
+        `Escrow ${escrow.id} marked for refund due to Shopify refund`,
       );
     }
 

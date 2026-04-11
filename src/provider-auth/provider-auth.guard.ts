@@ -32,7 +32,7 @@ export class ProviderAuthGuard implements CanActivate {
     const authHeader = request.headers['authorization'] as string | undefined;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.slice(7);
-      const payload = this.providerAuth.verifyJwt(token);
+      const payload = await this.providerAuth.verifyJwt(token);
 
       if (!payload || payload.type !== 'provider') {
         throw new UnauthorizedException('Invalid or expired provider token');

@@ -1,20 +1,31 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { MockupService } from '../mockup/mockup.service';
+import { ShopifyAuthService } from '../auth/shopify-auth.service';
 import { CreateProductDto } from './dto/create-product.dto';
-
-const PLATFORM_FEE_RATE = 0.05; // 5% platform fee
 
 @Injectable()
 export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
+  private readonly platformFeeRate: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly shopifyGql: ShopifyGraphqlService,
     private readonly mockupService: MockupService,
-  ) {}
+    private readonly shopifyAuth: ShopifyAuthService,
+    private readonly config: ConfigService,
+  ) {
+    this.platformFeeRate = this.config.get<number>('pricing.platformFeeRate') ?? 0.05;
+  }
 
   /**
    * Create a draft merchant product — validates design, calculates pricing, generates mockups.
@@ -59,12 +70,12 @@ export class ProductsService {
 
     // 4. Calculate pricing
     const baseCost = providerProduct.baseCost;
-    const platformFee = dto.retailPrice * PLATFORM_FEE_RATE;
+    const platformFee = dto.retailPrice * this.platformFeeRate;
     const profitMargin = dto.retailPrice - baseCost - platformFee;
 
     if (profitMargin < 0) {
       throw new BadRequestException(
-        `Retail price $${dto.retailPrice} is below cost. Minimum: $${(baseCost / (1 - PLATFORM_FEE_RATE)).toFixed(2)}`,
+        `Retail price $${dto.retailPrice} is below cost. Minimum: $${(baseCost / (1 - this.platformFeeRate)).toFixed(2)}`,
       );
     }
 
@@ -108,7 +119,7 @@ export class ProductsService {
    * Publish a draft product to the merchant's Shopify store.
    * Creates the product with all variants and mockup images.
    */
-  async publishToShopify(merchantProductId: string) {
+  async publishToShopify(merchantProductId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: merchantProductId },
       include: {
@@ -122,6 +133,11 @@ export class ProductsService {
 
     if (!product) {
       throw new NotFoundException('Product not found');
+    }
+
+    if (product.storeId !== callerStoreId) {
+      this.logger.warn(`Unauthorized publishToShopify: caller=${callerStoreId} product.store=${product.storeId}`);
+      throw new ForbiddenException();
     }
 
     if (product.status === 'published') {
@@ -161,7 +177,7 @@ export class ProductsService {
     }
 
     // Decrypt access token
-    const accessToken = this.decryptToken(store.shopifyToken);
+    const accessToken = this.shopifyAuth.getAccessToken(store);
     const variants = product.providerProduct.variants;
 
     // 1. Generate mockup images for each color
@@ -252,10 +268,10 @@ export class ProductsService {
         },
       };
     } catch (err) {
-      // Revert to draft on failure
+      // Revert to draft on failure (not 'error' — allows retry)
       await this.prisma.merchantProduct.update({
         where: { id: merchantProductId },
-        data: { status: 'error' },
+        data: { status: 'draft' },
       });
 
       this.logger.error(`Failed to publish product ${merchantProductId}: ${(err as Error).message}`);
@@ -318,16 +334,17 @@ export class ProductsService {
   /**
    * Unpublish — remove product from Shopify but keep in StellarPOD.
    */
-  async unpublish(merchantProductId: string) {
+  async unpublish(merchantProductId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: merchantProductId },
       include: { store: true },
     });
 
     if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
     if (!product.shopifyProductGid) throw new BadRequestException('Product is not published');
 
-    const accessToken = this.decryptToken(product.store.shopifyToken);
+    const accessToken = this.shopifyAuth.getAccessToken(product.store);
 
     await this.shopifyGql.productDelete(
       product.store.shopifyDomain,
@@ -352,18 +369,19 @@ export class ProductsService {
   /**
    * Delete a merchant product entirely.
    */
-  async deleteProduct(merchantProductId: string) {
+  async deleteProduct(merchantProductId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: merchantProductId },
       include: { store: true },
     });
 
     if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
 
     // If published, remove from Shopify first
     if (product.shopifyProductGid) {
       try {
-        const accessToken = this.decryptToken(product.store.shopifyToken);
+        const accessToken = this.shopifyAuth.getAccessToken(product.store);
         await this.shopifyGql.productDelete(
           product.store.shopifyDomain,
           accessToken,
@@ -382,31 +400,17 @@ export class ProductsService {
    * Calculate pricing breakdown for a product.
    */
   calculatePricing(baseCost: number, retailPrice: number) {
-    const platformFee = retailPrice * PLATFORM_FEE_RATE;
+    const platformFee = retailPrice * this.platformFeeRate;
     const profitMargin = retailPrice - baseCost - platformFee;
 
     return {
       baseCost: Math.round(baseCost * 100) / 100,
       retailPrice: Math.round(retailPrice * 100) / 100,
       platformFee: Math.round(platformFee * 100) / 100,
-      platformFeeRate: PLATFORM_FEE_RATE,
+      platformFeeRate: this.platformFeeRate,
       profitMargin: Math.round(profitMargin * 100) / 100,
       profitPercent: retailPrice > 0 ? Math.round((profitMargin / retailPrice) * 10000) / 100 : 0,
     };
   }
 
-  private decryptToken(encryptedToken: string): string {
-    // If token is not encrypted (no colons), return as-is (dev mode)
-    if (!encryptedToken.includes(':')) return encryptedToken;
-
-    try {
-      // Dynamic import to avoid circular dep — crypto util created by Phase 1
-      const crypto = require('../common/crypto.util');
-      const encryptionKey = process.env.ENCRYPTION_KEY || '';
-      return crypto.decrypt(encryptedToken, encryptionKey);
-    } catch {
-      // Fallback: return as-is (unencrypted token in dev)
-      return encryptedToken;
-    }
-  }
 }

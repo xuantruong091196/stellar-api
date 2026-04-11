@@ -83,31 +83,31 @@ export class ShippingController {
       return { rates: [] };
     }
 
-    const rates = this.shipping.calculateShippingRates(
+    const shopifyRates = await this.shipping.calculateShippingRates(
       rate.origin.country,
       rate.destination.country,
       rate.destination.postal_code,
       shippingItems,
     );
 
-    // Convert to Shopify carrier rate format
+    // Rates are already in Shopify carrier rate format from the service
+    // Add delivery date estimates
     const now = new Date();
-    const shopifyRates = rates.map((r) => {
+    const ratesWithDates = shopifyRates.map((r: any) => {
       const minDate = new Date(now);
-      minDate.setDate(minDate.getDate() + r.minDays);
+      minDate.setDate(minDate.getDate() + (r.min_delivery_date ? 0 : 5));
       const maxDate = new Date(now);
-      maxDate.setDate(maxDate.getDate() + r.maxDays);
+      maxDate.setDate(maxDate.getDate() + (r.max_delivery_date ? 0 : 10));
 
       return {
-        service_name: r.serviceName,
-        service_code: r.serviceCode,
-        total_price: Math.round(r.price * 100).toString(), // Shopify expects cents as string
+        ...r,
+        total_price: String(r.total_price), // Shopify expects string
         currency: rate.currency || 'USD',
         min_delivery_date: minDate.toISOString(),
         max_delivery_date: maxDate.toISOString(),
       };
     });
 
-    return { rates: shopifyRates };
+    return { rates: ratesWithDates };
   }
 }

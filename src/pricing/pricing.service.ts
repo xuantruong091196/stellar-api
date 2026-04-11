@@ -102,11 +102,16 @@ export class PricingService {
     let totalProfit = 0;
     let subtotal = 0;
 
+    // Batch fetch all provider products in one query (fixes N+1)
+    const productIds = [...new Set(orderItems.map((i) => i.providerProductId))];
+    const products = await this.prisma.providerProduct.findMany({
+      where: { id: { in: productIds } },
+      include: { variants: true },
+    });
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
     for (const item of orderItems) {
-      const product = await this.prisma.providerProduct.findUnique({
-        where: { id: item.providerProductId },
-        include: { variants: true },
-      });
+      const product = productMap.get(item.providerProductId);
 
       if (!product) {
         throw new NotFoundException(

@@ -3,9 +3,11 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
+import { ShopifyAuthService } from '../auth/shopify-auth.service';
 
 const STATUS_FLOW = [
   'pending',
@@ -24,6 +26,7 @@ export class ProviderOrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shopifyGraphql: ShopifyGraphqlService,
+    private readonly shopifyAuth: ShopifyAuthService,
   ) {}
 
   /**
@@ -97,7 +100,11 @@ export class ProviderOrdersService {
   /**
    * Update the status of a provider order with transition validation.
    */
-  async updateStatus(providerOrderId: string, newStatus: string) {
+  async updateStatus(
+    providerOrderId: string,
+    newStatus: string,
+    callerProviderId: string,
+  ) {
     const providerOrder = await this.prisma.providerOrder.findUnique({
       where: { id: providerOrderId },
     });
@@ -106,6 +113,11 @@ export class ProviderOrdersService {
       throw new NotFoundException(
         `ProviderOrder ${providerOrderId} not found`,
       );
+    }
+
+    if (providerOrder.providerId !== callerProviderId) {
+      this.logger.warn(`Unauthorized updateStatus: caller=${callerProviderId} order.provider=${providerOrder.providerId}`);
+      throw new ForbiddenException();
     }
 
     // Validate status transition
@@ -144,6 +156,7 @@ export class ProviderOrdersService {
   async submitTracking(
     providerOrderId: string,
     trackingNumber: string,
+    callerProviderId: string,
     trackingUrl?: string,
     company?: string,
   ) {
@@ -160,6 +173,11 @@ export class ProviderOrdersService {
       throw new NotFoundException(
         `ProviderOrder ${providerOrderId} not found`,
       );
+    }
+
+    if (providerOrder.providerId !== callerProviderId) {
+      this.logger.warn(`Unauthorized submitTracking: caller=${callerProviderId} order.provider=${providerOrder.providerId}`);
+      throw new ForbiddenException();
     }
 
     const allowedStatuses = ['printing', 'quality_check', 'packing', 'accepted'];
@@ -185,10 +203,11 @@ export class ProviderOrdersService {
     const order = providerOrder.order;
     if (order.shopifyOrderGid && order.store.shopifyToken) {
       try {
+        const accessToken = this.shopifyAuth.getAccessToken(order.store);
         const fulfillmentOrders =
           await this.shopifyGraphql.getFulfillmentOrders(
             order.store.shopifyDomain,
-            order.store.shopifyToken,
+            accessToken,
             order.shopifyOrderGid,
           );
 
@@ -210,7 +229,7 @@ export class ProviderOrdersService {
           if (lineItemsToFulfill.length > 0) {
             const result = await this.shopifyGraphql.fulfillmentCreate(
               order.store.shopifyDomain,
-              order.store.shopifyToken,
+              accessToken,
               openFulfillmentOrder.id,
               lineItemsToFulfill,
               {

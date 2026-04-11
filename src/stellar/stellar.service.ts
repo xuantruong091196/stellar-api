@@ -1,14 +1,42 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as StellarSdk from '@stellar/stellar-sdk';
+import Redis from 'ioredis';
+import Redlock, { Lock } from 'redlock';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  STELLAR_TX_LOCK_KEY,
+  STELLAR_TX_LOCK_TTL_MS,
+  ESCROW_ADVISORY_LOCK_KEY,
+} from '../common/constants';
 
+/**
+ * Stellar service — manages escrow holding account, treasury, and tx submission.
+ *
+ * Architecture:
+ *   ESCROW_HOLDING — custodies merchant funds during escrow
+ *   PLATFORM_TREASURY — receives platform fees on release
+ *   SYSTEM — signs copyright and admin operations
+ *
+ * Concurrency:
+ *   Redlock (30s TTL, explicit unlock) serializes all tx submissions
+ *   from the holding account. Falls back to pg_advisory_lock if Redis is down.
+ */
 @Injectable()
-export class StellarService {
+export class StellarService implements OnModuleInit {
   private readonly logger = new Logger(StellarService.name);
   private readonly horizonUrl: string;
   private readonly networkPassphrase: string;
   private readonly server: StellarSdk.Horizon.Server;
+  private readonly usdcIssuer: string;
+
+  private redis: Redis | null = null;
+  private redlock: Redlock | null = null;
+
+  // Keypairs initialized in onModuleInit
+  private escrowKeypair: StellarSdk.Keypair | null = null;
+  private treasuryKeypair: StellarSdk.Keypair | null = null;
+  private systemKeypair: StellarSdk.Keypair | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -24,31 +52,92 @@ export class StellarService {
         ? StellarSdk.Networks.PUBLIC
         : StellarSdk.Networks.TESTNET;
 
+    this.usdcIssuer =
+      this.config.get<string>('stellar.usdcIssuer') ||
+      'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+
     this.server = new StellarSdk.Horizon.Server(this.horizonUrl);
+  }
+
+  async onModuleInit() {
+    // Initialize keypairs from config
+    const escrowSecret = this.config.get<string>('stellar.escrowSecretKey');
+    const treasurySecret = this.config.get<string>('stellar.treasurySecretKey');
+    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
+
+    if (escrowSecret) {
+      this.escrowKeypair = StellarSdk.Keypair.fromSecret(escrowSecret);
+      this.logger.log(`Escrow holding account: ${this.escrowKeypair.publicKey()}`);
+    } else {
+      this.logger.warn('ESCROW_STELLAR_SECRET_KEY not configured — escrow operations will fail');
+    }
+
+    if (treasurySecret) {
+      this.treasuryKeypair = StellarSdk.Keypair.fromSecret(treasurySecret);
+      this.logger.log(`Treasury account: ${this.treasuryKeypair.publicKey()}`);
+    } else {
+      this.logger.warn('TREASURY_STELLAR_SECRET_KEY not configured — fee collection disabled');
+    }
+
+    if (systemSecret) {
+      this.systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
+    }
+
+    // Initialize Redis + Redlock
+    try {
+      const redisHost = this.config.get<string>('redis.host') || 'localhost';
+      const redisPort = this.config.get<number>('redis.port') || 6379;
+      const redisPassword = this.config.get<string>('redis.password');
+
+      this.redis = new Redis({
+        host: redisHost,
+        port: redisPort,
+        password: redisPassword || undefined,
+        maxRetriesPerRequest: 3,
+        lazyConnect: true,
+      });
+
+      await this.redis.connect();
+      this.redlock = new Redlock([this.redis], {
+        retryCount: 3,
+        retryDelay: 200,
+        retryJitter: 100,
+      });
+
+      this.logger.log('Redis + Redlock initialized for Stellar tx serialization');
+    } catch (err) {
+      this.logger.warn(
+        `Redis connection failed — falling back to pg_advisory_lock: ${err instanceof Error ? err.message : err}`,
+      );
+      this.redis = null;
+      this.redlock = null;
+    }
+  }
+
+  /** Public key of the escrow holding account (for Explorer links) */
+  getEscrowPublicKey(): string | null {
+    return this.escrowKeypair?.publicKey() || null;
   }
 
   /**
    * Build an unsigned escrow lock transaction.
-   * The merchant sends USDC to an escrow holding account.
+   * Merchant sends USDC to the escrow HOLDING account (not the provider).
    */
   async buildEscrowLockTx(
     merchantAddress: string,
-    providerAddress: string,
     amountUsdc: number,
     orderId: string,
   ): Promise<string> {
+    if (!this.escrowKeypair) {
+      throw new Error('Escrow holding account not configured');
+    }
+
     this.logger.log(
-      `Building escrow lock tx: merchant=${merchantAddress}, provider=${providerAddress}, amount=${amountUsdc}, order=${orderId}`,
+      `Building escrow lock tx: merchant=${merchantAddress}, amount=${amountUsdc}, order=${orderId}`,
     );
 
     const merchantAccount = await this.server.loadAccount(merchantAddress);
-
-    // USDC asset on Stellar (testnet uses same issuer convention)
-    const usdcAsset = new StellarSdk.Asset(
-      'USDC',
-      // Centre/Circle USDC issuer — replace with actual issuer for your network
-      'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-    );
+    const usdcAsset = this.getUsdcAsset();
 
     const transaction = new StellarSdk.TransactionBuilder(merchantAccount, {
       fee: StellarSdk.BASE_FEE,
@@ -56,7 +145,7 @@ export class StellarService {
     })
       .addOperation(
         StellarSdk.Operation.payment({
-          destination: providerAddress, // TODO: replace with escrow holding account
+          destination: this.escrowKeypair.publicKey(),
           asset: usdcAsset,
           amount: amountUsdc.toFixed(7),
         }),
@@ -69,64 +158,43 @@ export class StellarService {
   }
 
   /**
-   * Submit a signed transaction XDR to the Stellar network.
+   * Submit a signed lock transaction (signed by merchant client-side).
+   * Serialized via Redlock to prevent txBAD_SEQ.
    */
-  async submitTransaction(signedXdr: string): Promise<string> {
-    this.logger.log('Submitting transaction to Stellar network');
+  async submitLockTransaction(signedXdr: string): Promise<string> {
+    return this.withStellarLock(async () => {
+      this.logger.log('Submitting lock transaction to Stellar network');
 
-    const transaction = StellarSdk.TransactionBuilder.fromXDR(
-      signedXdr,
-      this.networkPassphrase,
-    );
+      const transaction = StellarSdk.TransactionBuilder.fromXDR(
+        signedXdr,
+        this.networkPassphrase,
+      );
 
-    const result = await this.server.submitTransaction(
-      transaction as StellarSdk.Transaction,
-    );
+      const result = await this.server.submitTransaction(
+        transaction as StellarSdk.Transaction,
+      );
 
-    const txHash = result.hash;
-    const ledger = result.ledger;
+      await this.prisma.stellarTransaction.create({
+        data: {
+          txHash: result.hash,
+          ledger: result.ledger,
+          type: 'escrow_lock',
+          fromAddress: (transaction as StellarSdk.Transaction).source,
+          toAddress: this.escrowKeypair!.publicKey(),
+          status: 'confirmed',
+          rawXdr: signedXdr,
+        },
+      });
 
-    // Record in DB
-    await this.prisma.stellarTransaction.create({
-      data: {
-        txHash,
-        ledger,
-        type: 'escrow_lock',
-        fromAddress: (transaction as StellarSdk.Transaction).source,
-        status: 'confirmed',
-        rawXdr: signedXdr,
-      },
+      this.logger.log(`Lock tx submitted: hash=${result.hash}, ledger=${result.ledger}`);
+      return result.hash;
     });
-
-    this.logger.log(`Transaction submitted: hash=${txHash}, ledger=${ledger}`);
-    return txHash;
   }
 
   /**
-   * Get USDC balance for a Stellar address.
-   */
-  async getAccountBalance(address: string): Promise<number> {
-    const account = await this.server.loadAccount(address);
-
-    const usdcBalance = account.balances.find(
-      (b) =>
-        b.asset_type === 'credit_alphanum4' &&
-        (b as StellarSdk.Horizon.HorizonApi.BalanceLineAsset).asset_code ===
-          'USDC',
-    );
-
-    if (!usdcBalance) {
-      return 0;
-    }
-
-    return parseFloat(usdcBalance.balance);
-  }
-
-  /**
-   * Build a release transaction: system account sends USDC from escrow holding
-   * to provider (provider_amount) and platform treasury (platform_fee).
-   *
-   * This is signed by the system key (arbiter).
+   * Release escrow: send providerAmount from holding → provider,
+   * and platformFee from holding → treasury.
+   * Serialized via Redlock.
    */
   async buildAndSubmitReleaseTx(
     providerAddress: string,
@@ -134,99 +202,118 @@ export class StellarService {
     platformFee: number,
     orderId: string,
   ): Promise<{ txHash: string; ledger: number }> {
-    this.logger.log(
-      `Building release tx: provider=${providerAddress}, amount=${providerAmount}, fee=${platformFee}`,
-    );
-
-    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
-    if (!systemSecret) {
-      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    if (!this.escrowKeypair) {
+      throw new Error('Escrow holding account not configured');
     }
 
-    const systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
-    const systemAccount = await this.server.loadAccount(systemKeypair.publicKey());
-
-    const usdcAsset = this.getUsdcAsset();
-
-    const txBuilder = new StellarSdk.TransactionBuilder(systemAccount, {
-      fee: StellarSdk.BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    });
-
-    // Pay provider
-    if (providerAmount > 0) {
-      txBuilder.addOperation(
-        StellarSdk.Operation.payment({
-          destination: providerAddress,
-          asset: usdcAsset,
-          amount: providerAmount.toFixed(7),
-        }),
+    return this.withStellarLock(async () => {
+      this.logger.log(
+        `Building release tx: provider=${providerAddress}, amount=${providerAmount}, fee=${platformFee}`,
       );
-    }
 
-    // Platform fee stays in system account (treasury)
-    // No operation needed — funds already in system account
+      const escrowAccount = await this.server.loadAccount(
+        this.escrowKeypair!.publicKey(),
+      );
+      const usdcAsset = this.getUsdcAsset();
 
-    const transaction = txBuilder
-      .addMemo(StellarSdk.Memo.text(`release:${orderId.slice(0, 18)}`))
-      .setTimeout(300)
-      .build();
+      const txBuilder = new StellarSdk.TransactionBuilder(escrowAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      });
 
-    transaction.sign(systemKeypair);
+      // Pay provider from holding account
+      if (providerAmount > 0) {
+        txBuilder.addOperation(
+          StellarSdk.Operation.payment({
+            destination: providerAddress,
+            asset: usdcAsset,
+            amount: providerAmount.toFixed(7),
+          }),
+        );
+      }
 
-    return this.submitAndRecord(transaction, 'escrow_release', systemKeypair.publicKey(), providerAddress, providerAmount);
+      // Send platform fee to treasury (separate account)
+      if (platformFee > 0 && this.treasuryKeypair) {
+        txBuilder.addOperation(
+          StellarSdk.Operation.payment({
+            destination: this.treasuryKeypair.publicKey(),
+            asset: usdcAsset,
+            amount: platformFee.toFixed(7),
+          }),
+        );
+      }
+
+      const transaction = txBuilder
+        .addMemo(StellarSdk.Memo.text(`release:${orderId.slice(0, 18)}`))
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(this.escrowKeypair!);
+
+      return this.submitAndRecord(
+        transaction,
+        'escrow_release',
+        this.escrowKeypair!.publicKey(),
+        providerAddress,
+        providerAmount,
+      );
+    });
   }
 
   /**
-   * Build a refund transaction: system account sends USDC back to merchant.
+   * Refund escrow: send full escrow amount from holding → merchant.
+   * Platform fee is NOT deducted on refund (fee was never separated).
+   * Serialized via Redlock.
    */
   async buildAndSubmitRefundTx(
     merchantAddress: string,
     amount: number,
     orderId: string,
   ): Promise<{ txHash: string; ledger: number }> {
-    this.logger.log(
-      `Building refund tx: merchant=${merchantAddress}, amount=${amount}`,
-    );
-
-    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
-    if (!systemSecret) {
-      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    if (!this.escrowKeypair) {
+      throw new Error('Escrow holding account not configured');
     }
 
-    const systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
-    const systemAccount = await this.server.loadAccount(systemKeypair.publicKey());
+    return this.withStellarLock(async () => {
+      this.logger.log(
+        `Building refund tx: merchant=${merchantAddress}, amount=${amount}`,
+      );
 
-    const usdcAsset = this.getUsdcAsset();
+      const escrowAccount = await this.server.loadAccount(
+        this.escrowKeypair!.publicKey(),
+      );
+      const usdcAsset = this.getUsdcAsset();
 
-    const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
-      fee: StellarSdk.BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(
-        StellarSdk.Operation.payment({
-          destination: merchantAddress,
-          asset: usdcAsset,
-          amount: amount.toFixed(7),
-        }),
-      )
-      .addMemo(StellarSdk.Memo.text(`refund:${orderId.slice(0, 19)}`))
-      .setTimeout(300)
-      .build();
+      const transaction = new StellarSdk.TransactionBuilder(escrowAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: merchantAddress,
+            asset: usdcAsset,
+            amount: amount.toFixed(7),
+          }),
+        )
+        .addMemo(StellarSdk.Memo.text(`refund:${orderId.slice(0, 19)}`))
+        .setTimeout(300)
+        .build();
 
-    transaction.sign(systemKeypair);
+      transaction.sign(this.escrowKeypair!);
 
-    return this.submitAndRecord(transaction, 'escrow_refund', systemKeypair.publicKey(), merchantAddress, amount);
+      return this.submitAndRecord(
+        transaction,
+        'escrow_refund',
+        this.escrowKeypair!.publicKey(),
+        merchantAddress,
+        amount,
+      );
+    });
   }
 
   /**
    * Submit a transaction with fee bump retry logic.
-   *
-   * Strategy:
-   * 1. Submit with base fee
-   * 2. If timeout, wrap in FeeBumpTransaction with higher fee
-   * 3. Exponential fee increases: 200, 500, 1000, 5000 stroops
-   * 4. Max 5 attempts
+   * Fees: 200 → 500 → 1000 → 5000 stroops.
    */
   async submitWithFeeBump(
     transaction: StellarSdk.Transaction,
@@ -235,15 +322,13 @@ export class StellarService {
     const fees = [200, 500, 1000, 5000];
     let lastError: unknown;
 
-    // Attempt 1: original transaction
     try {
       return await this.server.submitTransaction(transaction);
     } catch (err) {
       lastError = err;
-      this.logger.warn(`Transaction submit failed, attempting fee bump`);
+      this.logger.warn('Transaction submit failed, attempting fee bump');
     }
 
-    // Fee bump attempts
     for (const fee of fees) {
       try {
         const feeBump = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
@@ -265,13 +350,106 @@ export class StellarService {
     throw lastError;
   }
 
+  /** Get USDC balance for a Stellar address. */
+  async getAccountBalance(address: string): Promise<number> {
+    const account = await this.server.loadAccount(address);
+    const usdcBalance = account.balances.find(
+      (b) =>
+        b.asset_type === 'credit_alphanum4' &&
+        (b as StellarSdk.Horizon.HorizonApi.BalanceLineAsset).asset_code === 'USDC',
+    );
+    return usdcBalance ? parseFloat(usdcBalance.balance) : 0;
+  }
+
+  /** Register a design file hash on the Stellar ledger as copyright proof. */
+  async registerCopyrightHash(
+    fileSha256: string,
+    storeAddress: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(`Registering copyright hash: ${fileSha256} for ${storeAddress}`);
+
+    if (!this.systemKeypair) {
+      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    }
+
+    return this.withStellarLock(async () => {
+      const systemAccount = await this.server.loadAccount(
+        this.systemKeypair!.publicKey(),
+      );
+
+      const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.manageData({
+            name: `copyright:${fileSha256.slice(0, 40)}`,
+            value: storeAddress,
+          }),
+        )
+        .addMemo(StellarSdk.Memo.text('copyright'))
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(this.systemKeypair!);
+
+      const result = await this.server.submitTransaction(transaction);
+
+      await this.prisma.stellarTransaction.create({
+        data: {
+          txHash: result.hash,
+          ledger: result.ledger,
+          type: 'copyright',
+          fromAddress: this.systemKeypair!.publicKey(),
+          toAddress: storeAddress,
+          memo: fileSha256,
+          status: 'confirmed',
+        },
+      });
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
   // ─── PRIVATE HELPERS ────────────────────────
 
   private getUsdcAsset(): StellarSdk.Asset {
-    return new StellarSdk.Asset(
-      'USDC',
-      'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-    );
+    return new StellarSdk.Asset('USDC', this.usdcIssuer);
+  }
+
+  /**
+   * Execute a function while holding the Stellar tx lock.
+   * Uses Redlock (Redis) with fallback to pg_advisory_lock.
+   */
+  private async withStellarLock<T>(fn: () => Promise<T>): Promise<T> {
+    // Try Redlock first
+    if (this.redlock) {
+      let lock: Lock | null = null;
+      try {
+        lock = await this.redlock.acquire(
+          [STELLAR_TX_LOCK_KEY],
+          STELLAR_TX_LOCK_TTL_MS,
+        );
+        return await fn();
+      } finally {
+        if (lock) {
+          try {
+            await lock.release();
+          } catch {
+            this.logger.warn('Failed to release Redlock — will expire via TTL');
+          }
+        }
+      }
+    }
+
+    // Fallback: pg_advisory_lock within a Prisma interactive transaction
+    this.logger.warn('Using pg_advisory_lock fallback (Redis unavailable)');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        `SELECT pg_advisory_xact_lock(${ESCROW_ADVISORY_LOCK_KEY})`,
+      );
+      return fn();
+    });
   }
 
   private async submitAndRecord(
@@ -281,7 +459,10 @@ export class StellarService {
     toAddress: string,
     amount: number,
   ): Promise<{ txHash: string; ledger: number }> {
-    const result = await this.server.submitTransaction(transaction);
+    const result = await this.submitWithFeeBump(
+      transaction,
+      this.escrowKeypair!,
+    );
 
     await this.prisma.stellarTransaction.create({
       data: {
@@ -297,61 +478,6 @@ export class StellarService {
     });
 
     this.logger.log(`${type} tx submitted: hash=${result.hash}, ledger=${result.ledger}`);
-    return { txHash: result.hash, ledger: result.ledger };
-  }
-
-  /**
-   * Register a design file hash on the Stellar ledger as a copyright proof.
-   * Uses a manage-data operation to store the SHA-256 hash.
-   */
-  async registerCopyrightHash(
-    fileSha256: string,
-    storeAddress: string,
-  ): Promise<{ txHash: string; ledger: number }> {
-    this.logger.log(
-      `Registering copyright hash: ${fileSha256} for ${storeAddress}`,
-    );
-
-    const systemSecret = this.config.get<string>('stellar.systemSecretKey');
-    if (!systemSecret) {
-      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
-    }
-
-    const systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
-    const systemAccount = await this.server.loadAccount(
-      systemKeypair.publicKey(),
-    );
-
-    const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
-      fee: StellarSdk.BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(
-        StellarSdk.Operation.manageData({
-          name: `copyright:${fileSha256.slice(0, 40)}`,
-          value: storeAddress,
-        }),
-      )
-      .addMemo(StellarSdk.Memo.text('copyright'))
-      .setTimeout(300)
-      .build();
-
-    transaction.sign(systemKeypair);
-
-    const result = await this.server.submitTransaction(transaction);
-
-    await this.prisma.stellarTransaction.create({
-      data: {
-        txHash: result.hash,
-        ledger: result.ledger,
-        type: 'copyright',
-        fromAddress: systemKeypair.publicKey(),
-        toAddress: storeAddress,
-        memo: fileSha256,
-        status: 'confirmed',
-      },
-    });
-
     return { txHash: result.hash, ledger: result.ledger };
   }
 }

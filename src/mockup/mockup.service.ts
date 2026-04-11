@@ -1,8 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as sharp from 'sharp';
-import * as fs from 'fs';
-import * as path from 'path';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../prisma/prisma.service';
 
 /** Product template definitions — where to place the design on the product image */
@@ -21,21 +20,51 @@ const TEMPLATES: Record<
 @Injectable()
 export class MockupService {
   private readonly logger = new Logger(MockupService.name);
-  private readonly outputDir: string;
+  private readonly s3: S3Client;
+  private readonly bucket: string;
+  private readonly r2PublicUrl: string;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
   ) {
-    this.outputDir = path.join(process.cwd(), 'uploads', 'mockups');
-    fs.mkdirSync(this.outputDir, { recursive: true });
+    const r2AccountId = this.config.get<string>('aws.r2AccountId');
+    const accessKeyId = this.config.get<string>('aws.accessKeyId');
+    const secretAccessKey = this.config.get<string>('aws.secretAccessKey');
+
+    this.bucket = this.config.get<string>('aws.s3Bucket') || '';
+    this.r2PublicUrl = this.config.get<string>('aws.r2PublicUrl') || '';
+
+    this.s3 = new S3Client({
+      region: 'auto',
+      endpoint: `https://${r2AccountId || 'unconfigured'}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: accessKeyId || '',
+        secretAccessKey: secretAccessKey || '',
+      },
+    });
+  }
+
+  /**
+   * Upload a buffer to R2 and return the public URL.
+   */
+  private async uploadToR2(key: string, buffer: Buffer, contentType = 'image/jpeg'): Promise<string> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: contentType,
+      }),
+    );
+    return `${this.r2PublicUrl}/${key}`;
   }
 
   /**
    * Generate mockup images for a design across multiple product types.
    *
    * Takes the design image, resizes it to fit each product's design area,
-   * and composites it onto a product-colored background.
+   * and composites it onto a product-colored background. Uploads results to R2.
    */
   async generateMockups(
     designId: string,
@@ -58,12 +87,9 @@ export class MockupService {
           productType,
         );
 
-        // Save to local uploads (replace with S3 in production)
-        const filename = `${designId}_${productType}.png`;
-        const filePath = path.join(this.outputDir, filename);
-        fs.writeFileSync(filePath, mockupBuffer);
-
-        const imageUrl = `/mockups/${filename}`;
+        const color = this.getProductColorName(productType);
+        const key = `mockups/${designId}/${productType}-${color}.jpg`;
+        const imageUrl = await this.uploadToR2(key, mockupBuffer);
 
         // Save to DB
         await this.prisma.mockup.create({
@@ -97,20 +123,31 @@ export class MockupService {
   }
 
   /**
-   * Generate a thumbnail from an image buffer.
+   * Generate a thumbnail from an image buffer, upload to R2, and return the public URL.
    */
   async generateThumbnail(
+    designId: string,
     buffer: Buffer,
     width: number = 300,
     height: number = 300,
-  ): Promise<Buffer> {
-    return sharp(buffer)
-      .resize(width, height, {
-        fit: 'inside',
-        withoutEnlargement: true,
-      })
-      .png({ quality: 80 })
-      .toBuffer();
+  ): Promise<string> {
+    try {
+      const thumbnailBuffer = await sharp(buffer)
+        .resize(width, height, {
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+
+      const key = `mockups/${designId}/thumbnail.jpg`;
+      return await this.uploadToR2(key, thumbnailBuffer);
+    } catch (err) {
+      this.logger.error(
+        `Failed to generate thumbnail for design ${designId}: ${(err as Error).message}`,
+      );
+      throw err;
+    }
   }
 
   /**
@@ -129,33 +166,40 @@ export class MockupService {
     // Determine product background color
     const bgColor = this.getProductColor(productType);
 
-    // Resize design to fit the design area
-    const resizedDesign = await sharp(designBuffer)
-      .resize(designArea.w, designArea.h, {
-        fit: 'contain',
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      })
-      .png()
-      .toBuffer();
+    try {
+      // Resize design to fit the design area
+      const resizedDesign = await sharp(designBuffer)
+        .resize(designArea.w, designArea.h, {
+          fit: 'contain',
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
+        .png()
+        .toBuffer();
 
-    // Create product background and composite design onto it
-    return sharp({
-      create: {
-        width,
-        height,
-        channels: 4,
-        background: bgColor,
-      },
-    })
-      .composite([
-        {
-          input: resizedDesign,
-          left: designArea.x,
-          top: designArea.y,
+      // Create product background and composite design onto it
+      return await sharp({
+        create: {
+          width,
+          height,
+          channels: 4,
+          background: bgColor,
         },
-      ])
-      .png()
-      .toBuffer();
+      })
+        .composite([
+          {
+            input: resizedDesign,
+            left: designArea.x,
+            top: designArea.y,
+          },
+        ])
+        .jpeg({ quality: 90 })
+        .toBuffer();
+    } catch (err) {
+      this.logger.error(
+        `Sharp compositing failed for ${productType}: ${(err as Error).message}`,
+      );
+      throw err;
+    }
   }
 
   private getProductColor(productType: string): { r: number; g: number; b: number; alpha: number } {
@@ -168,5 +212,17 @@ export class MockupService {
       'tote-bag': { r: 230, g: 220, b: 200, alpha: 1 },         // Beige
     };
     return colors[productType] || { r: 255, g: 255, b: 255, alpha: 1 };
+  }
+
+  private getProductColorName(productType: string): string {
+    const colorNames: Record<string, string> = {
+      't-shirt-front': 'lightgray',
+      't-shirt-back': 'lightgray',
+      'mug': 'white',
+      'poster': 'white',
+      'hoodie-front': 'darkgray',
+      'tote-bag': 'beige',
+    };
+    return colorNames[productType] || 'white';
   }
 }

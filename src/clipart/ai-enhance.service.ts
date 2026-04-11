@@ -20,12 +20,18 @@ export interface AiEnhanceResult {
   prompt: string;
 }
 
+// Freepik reimagine-flux accepted values:
+// 'original', 'square_1_1', 'classic_4_3', 'traditional_3_4',
+// 'widescreen_16_9', 'social_story_9_16', 'standard_3_2',
+// 'portrait_2_3', 'horizontal_2_1', 'vertical_1_2', 'social_post_4_5'
 const ASPECT_RATIO_MAP: { range: [number, number]; value: string }[] = [
-  { range: [0.5, 0.65], value: 'portrait_9_16' },
-  { range: [0.65, 0.85], value: 'portrait_3_4' },
+  { range: [0.5, 0.6], value: 'social_story_9_16' },
+  { range: [0.6, 0.7], value: 'portrait_2_3' },
+  { range: [0.7, 0.85], value: 'traditional_3_4' },
   { range: [0.85, 1.15], value: 'square_1_1' },
-  { range: [1.15, 1.45], value: 'landscape_4_3' },
-  { range: [1.45, 2.0], value: 'landscape_16_9' },
+  { range: [1.15, 1.45], value: 'classic_4_3' },
+  { range: [1.45, 2.0], value: 'widescreen_16_9' },
+  { range: [2.0, 3.0], value: 'horizontal_2_1' },
 ];
 
 function mapAspectRatio(ratio?: number): string {
@@ -33,7 +39,7 @@ function mapAspectRatio(ratio?: number): string {
   for (const entry of ASPECT_RATIO_MAP) {
     if (ratio >= entry.range[0] && ratio < entry.range[1]) return entry.value;
   }
-  return ratio < 1 ? 'portrait_3_4' : 'landscape_4_3';
+  return ratio < 1 ? 'traditional_3_4' : 'classic_4_3';
 }
 
 function buildPrompt(options: AiEnhanceOptions): string {

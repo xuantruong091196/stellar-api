@@ -59,6 +59,10 @@ export class ClipartController {
       prompt?: string;
       strength?: number;
       upscale?: '2x' | '4x' | null;
+      productType?: string;
+      printMethod?: string;
+      layerDescriptions?: string;
+      aspectRatio?: number;
     },
   ) {
     if (!FREEPIK_API_KEY) {

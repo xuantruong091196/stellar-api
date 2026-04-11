@@ -7,6 +7,10 @@ export interface AiEnhanceOptions {
   prompt?: string;
   strength?: number;
   upscale?: '2x' | '4x' | null;
+  productType?: string;
+  printMethod?: string;
+  layerDescriptions?: string;
+  aspectRatio?: number;
 }
 
 export interface AiEnhanceResult {
@@ -14,6 +18,45 @@ export interface AiEnhanceResult {
   width: number;
   height: number;
   prompt: string;
+}
+
+const ASPECT_RATIO_MAP: { range: [number, number]; value: string }[] = [
+  { range: [0.5, 0.65], value: 'portrait_9_16' },
+  { range: [0.65, 0.85], value: 'portrait_3_4' },
+  { range: [0.85, 1.15], value: 'square_1_1' },
+  { range: [1.15, 1.45], value: 'landscape_4_3' },
+  { range: [1.45, 2.0], value: 'landscape_16_9' },
+];
+
+function mapAspectRatio(ratio?: number): string {
+  if (!ratio) return 'square_1_1';
+  for (const entry of ASPECT_RATIO_MAP) {
+    if (ratio >= entry.range[0] && ratio < entry.range[1]) return entry.value;
+  }
+  return ratio < 1 ? 'portrait_3_4' : 'landscape_4_3';
+}
+
+function buildPrompt(options: AiEnhanceOptions): string {
+  const {
+    productType = 'product',
+    printMethod = 'DTG',
+    layerDescriptions = 'design layers',
+  } = options;
+
+  if (options.prompt) return options.prompt;
+
+  return [
+    `Enhance this design for print-on-demand ${productType} production.`,
+    `Print method: ${printMethod}.`,
+    `Design contains: ${layerDescriptions}.`,
+    'PRESERVE the exact composition, layout, and text content.',
+    'PRESERVE all colors.',
+    'DO NOT add new elements, borders, frames, or watermarks.',
+    'DO NOT change text content or font style.',
+    'Enhance: sharpen edges, smooth anti-aliasing, increase color vibrancy.',
+    'Output on TRANSPARENT background (PNG with alpha).',
+    'Production-ready artwork, same composition, enhanced quality.',
+  ].join(' ');
 }
 
 @Injectable()
@@ -24,8 +67,7 @@ export class AiEnhanceService {
   async enhance(options: AiEnhanceOptions): Promise<AiEnhanceResult> {
     const {
       imageBase64,
-      prompt = 'highly detailed, professional vector illustration, smooth lines, flat design, white background, print-ready',
-      strength = 0.5,
+      strength = 0.3,
       upscale = null,
     } = options;
 
@@ -33,26 +75,31 @@ export class AiEnhanceService {
       throw new Error('FREEPIK_API_KEY not configured');
     }
 
-    this.logger.log(`AI enhance request: strength=${strength}, upscale=${upscale || 'none'}`);
-
-    // Map strength to imagination level
+    const prompt = buildPrompt(options);
     const imagination = strength <= 0.3 ? 'subtle' : strength >= 0.7 ? 'wild' : 'vivid';
+    const aspect_ratio = mapAspectRatio(options.aspectRatio);
 
-    // Step 1: Reimagine via Freepik Flux
-    const reimagineRes = await fetch(`${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux`, {
-      method: 'POST',
-      headers: {
-        'x-freepik-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+    this.logger.log(
+      `AI enhance: strength=${strength}, imagination=${imagination}, ratio=${aspect_ratio}`,
+    );
+
+    const reimagineRes = await fetch(
+      `${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux`,
+      {
+        method: 'POST',
+        headers: {
+          'x-freepik-api-key': this.apiKey,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          image: imageBase64,
+          prompt,
+          imagination,
+          aspect_ratio,
+        }),
       },
-      body: JSON.stringify({
-        image: imageBase64,
-        prompt,
-        imagination,
-        aspect_ratio: 'square_1_1',
-      }),
-    });
+    );
 
     if (!reimagineRes.ok) {
       const body = await reimagineRes.text();
@@ -60,7 +107,7 @@ export class AiEnhanceService {
       throw new Error(`AI enhancement failed: ${reimagineRes.status}`);
     }
 
-    const reimagineData = await reimagineRes.json() as {
+    const reimagineData = (await reimagineRes.json()) as {
       data: {
         generated?: string[];
         task_id?: string;
@@ -68,10 +115,9 @@ export class AiEnhanceService {
       };
     };
 
-    // Poll if task not yet completed
     let imageUrl = reimagineData.data?.generated?.[0] || '';
     const taskId = reimagineData.data?.task_id;
-    let status = reimagineData.data?.status || '';
+    const status = reimagineData.data?.status || '';
 
     if (!imageUrl && taskId && status !== 'COMPLETED') {
       imageUrl = await this.pollTask(taskId);
@@ -81,10 +127,9 @@ export class AiEnhanceService {
       throw new Error('AI returned no image');
     }
 
-    // Proxy image through backend to avoid CORS issues with GCS signed URLs
     const proxiedUrl = await this.proxyImageToBase64(imageUrl);
 
-    this.logger.log(`AI enhance complete, proxied to data URL (${proxiedUrl.length} chars)`);
+    this.logger.log(`AI enhance complete (${proxiedUrl.length} chars)`);
     return { imageUrl: proxiedUrl, width: 0, height: 0, prompt };
   }
 
@@ -92,7 +137,7 @@ export class AiEnhanceService {
     const res = await fetch(url);
     if (!res.ok) {
       this.logger.warn(`Failed to proxy image: ${res.status}`);
-      return url; // fallback to original URL
+      return url;
     }
     const contentType = res.headers.get('content-type') || 'image/jpeg';
     const buffer = Buffer.from(await res.arrayBuffer());
@@ -103,19 +148,22 @@ export class AiEnhanceService {
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 2000));
 
-      const res = await fetch(`${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux/${taskId}`, {
-        headers: {
-          'x-freepik-api-key': this.apiKey,
-          Accept: 'application/json',
+      const res = await fetch(
+        `${FREEPIK_API}/ai/beta/text-to-image/reimagine-flux/${taskId}`,
+        {
+          headers: {
+            'x-freepik-api-key': this.apiKey,
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
       if (!res.ok) {
         this.logger.warn(`Poll attempt ${i + 1} failed: ${res.status}`);
         continue;
       }
 
-      const data = await res.json() as {
+      const data = (await res.json()) as {
         data: { generated?: string[]; status?: string };
       };
 

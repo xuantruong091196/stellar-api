@@ -44,6 +44,7 @@ export class ClipartController {
     return { url };
   }
 
+  @Public() // TODO: add per-user auth when Shopify session tokens are wired to frontend API calls
   @Post('ai-enhance')
   @ApiOperation({
     summary: 'AI-enhance a draft design using Freepik Reimagine',
@@ -70,6 +71,7 @@ export class ClipartController {
     return this.aiEnhanceService.enhance(dto);
   }
 
+  @Public()
   @Post('ai-remove-bg')
   @ApiOperation({ summary: 'Remove background from an image' })
   async aiRemoveBg(
@@ -110,6 +112,7 @@ export class ClipartController {
     }
   }
 
+  @Public()
   @Post('ai-generate')
   @ApiOperation({ summary: 'Generate image from text prompt' })
   async aiGenerate(
@@ -179,6 +182,7 @@ export class ClipartController {
     }
   }
 
+  @Public()
   @Post('ai-upscale')
   @ApiOperation({ summary: 'Upscale an image' })
   async aiUpscale(

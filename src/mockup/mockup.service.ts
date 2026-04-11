@@ -4,17 +4,34 @@ import * as sharp from 'sharp';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../prisma/prisma.service';
 
-/** Product template definitions — where to place the design on the product image */
+/**
+ * Product template definitions — where to place the design on the product image.
+ *
+ * Two modes:
+ * 1. Solid-color background (current) — Sharp creates a colored canvas + composites design
+ * 2. PNG template (photorealistic) — design composited onto template where alpha=0 (transparent)
+ *
+ * To add photorealistic templates:
+ *   - Place PNG files in assets/mockup-templates/{product-type}.png
+ *   - Printable area = fully transparent pixels (alpha=0)
+ *   - Non-printable area = fully opaque (alpha=255)
+ *   - Add templatePath to the entry below
+ */
 const TEMPLATES: Record<
   string,
-  { width: number; height: number; designArea: { x: number; y: number; w: number; h: number } }
+  {
+    width: number;
+    height: number;
+    designArea: { x: number; y: number; w: number; h: number };
+    templatePath?: string; // Path to PNG template file (optional, falls back to solid color)
+  }
 > = {
-  't-shirt-front': { width: 1000, height: 1200, designArea: { x: 300, y: 200, w: 400, h: 500 } },
-  't-shirt-back': { width: 1000, height: 1200, designArea: { x: 300, y: 150, w: 400, h: 500 } },
-  'mug': { width: 1000, height: 800, designArea: { x: 250, y: 200, w: 500, h: 400 } },
-  'poster': { width: 800, height: 1200, designArea: { x: 50, y: 50, w: 700, h: 1100 } },
-  'hoodie-front': { width: 1000, height: 1200, designArea: { x: 300, y: 250, w: 400, h: 450 } },
-  'tote-bag': { width: 800, height: 1000, designArea: { x: 200, y: 200, w: 400, h: 500 } },
+  't-shirt-front': { width: 1200, height: 1200, designArea: { x: 350, y: 200, w: 500, h: 600 } },
+  't-shirt-back': { width: 1200, height: 1200, designArea: { x: 350, y: 180, w: 500, h: 600 } },
+  'mug': { width: 1200, height: 1200, designArea: { x: 250, y: 300, w: 700, h: 600 } },
+  'poster': { width: 1200, height: 1200, designArea: { x: 100, y: 100, w: 1000, h: 1000 } },
+  'hoodie-front': { width: 1200, height: 1200, designArea: { x: 350, y: 280, w: 500, h: 550 } },
+  'tote-bag': { width: 1200, height: 1200, designArea: { x: 300, y: 250, w: 600, h: 700 } },
 };
 
 @Injectable()

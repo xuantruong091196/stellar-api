@@ -7,7 +7,11 @@ import {
   Query,
   Body,
   Req,
+  Sse,
+  MessageEvent,
+  Headers,
 } from '@nestjs/common';
+import { Observable, interval, switchMap, map, filter } from 'rxjs';
 import {
   ApiTags,
   ApiOperation,
@@ -25,6 +29,51 @@ export class ProviderOrdersController {
   constructor(
     private readonly providerOrdersService: ProviderOrdersService,
   ) {}
+
+  @Sse(':providerId/stream')
+  @ApiOperation({ summary: 'SSE stream of real-time order notifications for a provider' })
+  @ApiParam({ name: 'providerId', description: 'The provider ID' })
+  orderStream(
+    @Param('providerId') providerId: string,
+    @Headers('last-event-id') lastEventId?: string,
+  ): Observable<MessageEvent> {
+    let sinceMs = lastEventId ? parseInt(lastEventId, 10) : Date.now();
+
+    return interval(3000).pipe(
+      switchMap(async () => {
+        const since = new Date(sinceMs);
+        const orders = await this.providerOrdersService.getOrdersSince(
+          providerId,
+          since,
+        );
+        return orders;
+      }),
+      filter((orders) => orders.length > 0),
+      switchMap((orders) => {
+        // Update sinceMs to the latest updatedAt so we don't re-send
+        const latestMs = Math.max(
+          ...orders.map((o) => new Date(o.updatedAt).getTime()),
+        );
+        sinceMs = latestMs;
+
+        return orders.map((order): MessageEvent => {
+          const eventType =
+            order.status === 'pending' ? 'new_order' : 'status_changed';
+          return {
+            id: String(new Date(order.updatedAt).getTime()),
+            type: eventType,
+            data: JSON.stringify({
+              id: order.id,
+              orderId: order.orderId,
+              providerId: order.providerId,
+              status: order.status,
+              updatedAt: order.updatedAt,
+            }),
+          };
+        });
+      }),
+    );
+  }
 
   @Get(':providerId')
   @ApiOperation({ summary: 'List orders for a provider' })

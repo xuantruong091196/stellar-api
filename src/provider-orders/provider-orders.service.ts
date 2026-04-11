@@ -72,6 +72,19 @@ export class ProviderOrdersService {
   }
 
   /**
+   * Get provider orders updated since a given timestamp.
+   */
+  async getOrdersSince(providerId: string, sinceTimestamp: Date) {
+    return this.prisma.providerOrder.findMany({
+      where: {
+        providerId,
+        updatedAt: { gt: sinceTimestamp },
+      },
+      orderBy: { updatedAt: 'asc' },
+    });
+  }
+
+  /**
    * Get a single provider order with full details.
    */
   async getProviderOrder(providerOrderId: string) {

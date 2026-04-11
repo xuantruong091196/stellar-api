@@ -8,9 +8,15 @@ const SECRET_NAME_MAP: Record<string, string> = {
   DATABASE_URL: 'db_url',
   REDIS_PASSWORD: 'redis_password',
   SYSTEM_STELLAR_SECRET_KEY: 'stellar_secret',
+  ESCROW_STELLAR_SECRET_KEY: 'escrow_stellar_secret',
+  TREASURY_STELLAR_SECRET_KEY: 'treasury_stellar_secret',
   SHOPIFY_API_SECRET: 'shopify_secret',
   SHOPIFY_WEBHOOK_SECRET: 'shopify_webhook_secret',
   AWS_SECRET_ACCESS_KEY: 'aws_secret',
+  ENCRYPTION_KEY: 'encryption_key',
+  EASYPOST_API_KEY: 'easypost_api_key',
+  ADMIN_API_KEY: 'admin_api_key',
+  PROVIDER_JWT_SECRET: 'provider_jwt_secret',
 };
 
 /**

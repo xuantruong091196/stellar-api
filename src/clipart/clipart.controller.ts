@@ -44,7 +44,6 @@ export class ClipartController {
     return { url };
   }
 
-  @Public()
   @Post('ai-enhance')
   @ApiOperation({
     summary: 'AI-enhance a draft design using Freepik Reimagine',
@@ -71,7 +70,6 @@ export class ClipartController {
     return this.aiEnhanceService.enhance(dto);
   }
 
-  @Public()
   @Post('ai-remove-bg')
   @ApiOperation({ summary: 'Remove background from an image' })
   async aiRemoveBg(
@@ -112,7 +110,6 @@ export class ClipartController {
     }
   }
 
-  @Public()
   @Post('ai-generate')
   @ApiOperation({ summary: 'Generate image from text prompt' })
   async aiGenerate(
@@ -135,13 +132,15 @@ export class ClipartController {
       'line-art': ', line art, outline sketch, black and white, detailed lines',
     };
 
-    const fullPrompt = dto.prompt + (styleSuffixes[dto.style || ''] || styleSuffixes['pod-ready']);
-    const bgNote = dto.transparentBg ? ', transparent background, PNG' : ', white background';
-
-    // Sanitize prompt: strip HTML, limit length
-    const sanitized = (fullPrompt + bgNote)
+    // Sanitize user prompt FIRST: strip HTML, limit length
+    const cleanPrompt = dto.prompt
       .replace(/<[^>]*>/g, '')
-      .slice(0, 500);
+      .replace(/[^\w\s,.\-!?'"()]/g, '')
+      .slice(0, 300);
+
+    const styleSuffix = styleSuffixes[dto.style || ''] || styleSuffixes['pod-ready'];
+    const bgNote = dto.transparentBg ? ', transparent background, PNG' : ', white background';
+    const sanitized = (cleanPrompt + styleSuffix + bgNote).slice(0, 500);
 
     try {
       const res = await fetch(`https://api.freepik.com/v1/ai/text-to-image`, {
@@ -180,7 +179,6 @@ export class ClipartController {
     }
   }
 
-  @Public()
   @Post('ai-upscale')
   @ApiOperation({ summary: 'Upscale an image' })
   async aiUpscale(

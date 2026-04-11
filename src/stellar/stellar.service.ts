@@ -65,22 +65,34 @@ export class StellarService implements OnModuleInit {
     const treasurySecret = this.config.get<string>('stellar.treasurySecretKey');
     const systemSecret = this.config.get<string>('stellar.systemSecretKey');
 
-    if (escrowSecret) {
-      this.escrowKeypair = StellarSdk.Keypair.fromSecret(escrowSecret);
-      this.logger.log(`Escrow holding account: ${this.escrowKeypair.publicKey()}`);
+    if (escrowSecret && escrowSecret.startsWith('S')) {
+      try {
+        this.escrowKeypair = StellarSdk.Keypair.fromSecret(escrowSecret);
+        this.logger.log(`Escrow holding account: ${this.escrowKeypair.publicKey()}`);
+      } catch (e) {
+        this.logger.warn(`Invalid ESCROW_STELLAR_SECRET_KEY: ${(e as Error).message}`);
+      }
     } else {
       this.logger.warn('ESCROW_STELLAR_SECRET_KEY not configured — escrow operations will fail');
     }
 
-    if (treasurySecret) {
-      this.treasuryKeypair = StellarSdk.Keypair.fromSecret(treasurySecret);
-      this.logger.log(`Treasury account: ${this.treasuryKeypair.publicKey()}`);
+    if (treasurySecret && treasurySecret.startsWith('S')) {
+      try {
+        this.treasuryKeypair = StellarSdk.Keypair.fromSecret(treasurySecret);
+        this.logger.log(`Treasury account: ${this.treasuryKeypair.publicKey()}`);
+      } catch (e) {
+        this.logger.warn(`Invalid TREASURY_STELLAR_SECRET_KEY: ${(e as Error).message}`);
+      }
     } else {
       this.logger.warn('TREASURY_STELLAR_SECRET_KEY not configured — fee collection disabled');
     }
 
-    if (systemSecret) {
-      this.systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
+    if (systemSecret && systemSecret.startsWith('S')) {
+      try {
+        this.systemKeypair = StellarSdk.Keypair.fromSecret(systemSecret);
+      } catch (e) {
+        this.logger.warn(`Invalid SYSTEM_STELLAR_SECRET_KEY: ${(e as Error).message}`);
+      }
     }
 
     // Initialize Redis + Redlock

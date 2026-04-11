@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import EasyPostClient from '@easypost/api';
+import * as EasyPostApi from '@easypost/api';
+const EasyPostClient = (EasyPostApi as any).default || EasyPostApi;
 
 interface ShippingItem {
   weightGrams: number;

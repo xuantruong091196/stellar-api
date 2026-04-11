@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import configuration from './config/configuration';
 import { PrismaModule } from './prisma/prisma.module';
@@ -27,6 +28,7 @@ import { ClipartModule } from './clipart/clipart.module';
       isGlobal: true,
       load: [configuration],
     }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     StellarModule,
     ShopifyModule,

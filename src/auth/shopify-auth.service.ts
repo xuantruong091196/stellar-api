@@ -269,7 +269,7 @@ export class ShopifyAuthService {
     const nodeEnv = this.config.get<string>('nodeEnv');
     const host =
       nodeEnv === 'production'
-        ? `https://api.stellarpod.com`
+        ? `https://api.stelo.life`
         : `http://localhost:${port}`;
     return `${host}/auth/callback`;
   }
@@ -279,7 +279,7 @@ export class ShopifyAuthService {
     const nodeEnv = this.config.get<string>('nodeEnv');
     const host =
       nodeEnv === 'production'
-        ? `https://api.stellarpod.com`
+        ? `https://api.stelo.life`
         : `http://localhost:${port}`;
     return `${host}/shopify/webhooks`;
   }

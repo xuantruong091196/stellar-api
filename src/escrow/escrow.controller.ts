@@ -24,7 +24,7 @@ export class EscrowController {
     @Param('providerOrderId') providerOrderId: string,
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.escrowService.lockEscrow(providerOrderId, callerStoreId);
   }
 
@@ -36,7 +36,7 @@ export class EscrowController {
     @Body('signedXdr') signedXdr: string,
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.escrowService.confirmLock(escrowId, signedXdr, callerStoreId);
   }
 
@@ -47,7 +47,7 @@ export class EscrowController {
     @Param('escrowId') escrowId: string,
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.escrowService.retryLock(escrowId, callerStoreId);
   }
 
@@ -58,7 +58,7 @@ export class EscrowController {
     @Param('escrowId') escrowId: string,
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.escrowService.releaseEscrow(escrowId, callerStoreId);
   }
 
@@ -69,7 +69,7 @@ export class EscrowController {
     @Param('escrowId') escrowId: string,
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.escrowService.refundEscrow(escrowId, callerStoreId);
   }
 
@@ -99,8 +99,8 @@ export class EscrowController {
     },
     @Req() req: any,
   ) {
-    const callerStoreId = req.storeId || body.storeId;
-    const callerProviderId = req.providerId || body.providerId;
+    const callerStoreId = req.store?.id || body.storeId;
+    const callerProviderId = req.provider?.id || body.providerId;
     return this.escrowService.raiseDispute(
       escrowId,
       body.raisedBy,

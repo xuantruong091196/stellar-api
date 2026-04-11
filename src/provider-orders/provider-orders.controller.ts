@@ -106,7 +106,7 @@ export class ProviderOrdersController {
     @Body() dto: UpdateProviderOrderStatusDto,
     @Req() req: any,
   ) {
-    const callerProviderId = req.providerId;
+    const callerProviderId = req.provider?.id;
     return this.providerOrdersService.updateStatus(id, dto.status, callerProviderId);
   }
 
@@ -123,7 +123,7 @@ export class ProviderOrdersController {
     @Body() dto: SubmitTrackingDto,
     @Req() req: any,
   ) {
-    const callerProviderId = req.providerId;
+    const callerProviderId = req.provider?.id;
     return this.providerOrdersService.submitTracking(
       id,
       dto.trackingNumber,

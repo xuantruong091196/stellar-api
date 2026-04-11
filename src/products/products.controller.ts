@@ -34,7 +34,7 @@ export class ProductsController {
   @ApiParam({ name: 'productId', description: 'Merchant product ID (not Shopify ID)' })
   @ApiResponse({ status: 200, description: 'Product published with Shopify product ID' })
   async publish(@Param('productId') productId: string, @Req() req: any) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.productsService.publishToShopify(productId, callerStoreId);
   }
 
@@ -42,7 +42,7 @@ export class ProductsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remove product from Shopify (keep in StellarPOD)' })
   async unpublish(@Param('productId') productId: string, @Req() req: any) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.productsService.unpublish(productId, callerStoreId);
   }
 
@@ -69,7 +69,7 @@ export class ProductsController {
   @Delete(':productId')
   @ApiOperation({ summary: 'Delete product (also removes from Shopify if published)' })
   async deleteProduct(@Param('productId') productId: string, @Req() req: any) {
-    const callerStoreId = req.storeId || req.body?.storeId;
+    const callerStoreId = req.store?.id || req.body?.storeId;
     return this.productsService.deleteProduct(productId, callerStoreId);
   }
 

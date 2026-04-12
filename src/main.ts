@@ -5,6 +5,7 @@ import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-option
 import rateLimit from 'express-rate-limit';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { readSecret } from './config/read-secret';
 
 async function bootstrap() {
@@ -27,6 +28,9 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
+
+  // Global exception filter — consistent error response format
+  app.useGlobalFilters(new GlobalExceptionFilter());
 
   // Global logging interceptor
   app.useGlobalInterceptors(new LoggingInterceptor());

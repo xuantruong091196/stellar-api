@@ -236,6 +236,8 @@ export class ShopifyController {
       return;
     }
 
+    const refundAmount = parseFloat(String(payload.amount || '0'));
+
     await this.prisma.order.update({
       where: { id: order.id },
       data: { status: OrderStatus.REFUNDED },
@@ -254,6 +256,20 @@ export class ShopifyController {
         `Escrow ${escrow.id} marked for refund due to Shopify refund`,
       );
     }
+
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'order.refunded',
+        storeId,
+        payload: {
+          orderId: order.id,
+          shopifyOrderNumber: order.shopifyOrderNumber,
+          amountUsdc: refundAmount || order.totalUsdc,
+          storeId,
+        } as never,
+      },
+    });
 
     this.logger.log(`Order ${order.id} refunded via webhook`);
   }

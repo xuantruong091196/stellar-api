@@ -116,7 +116,7 @@ export class EscrowService {
 
     const txHash = await this.stellar.submitLockTransaction(signedXdr);
 
-    await this.prisma.escrow.update({
+    const updatedEscrow = await this.prisma.escrow.update({
       where: { id: escrowId },
       data: {
         status: EscrowStatus.LOCKED,
@@ -129,6 +129,23 @@ export class EscrowService {
     await this.prisma.order.update({
       where: { id: escrow.orderId },
       data: { status: 'ESCROW_LOCKED' },
+    });
+
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'escrow.locked',
+        storeId: escrow.storeId,
+        providerId: escrow.providerId || undefined,
+        payload: {
+          escrowId,
+          amountUsdc: updatedEscrow.amountUsdc,
+          txHash,
+          orderId: escrow.orderId,
+          storeId: escrow.storeId,
+          providerId: escrow.providerId,
+        } as never,
+      },
     });
 
     this.logger.log(`Escrow ${escrowId} locked: tx=${txHash}`);
@@ -166,6 +183,21 @@ export class EscrowService {
         data: { status: EscrowStatus.LOCK_FAILED, retryCount: newRetryCount },
       });
       this.logger.warn(`Escrow ${escrowId} failed after ${newRetryCount} retries`);
+
+      // Emit event
+      await this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'escrow.lock_failed',
+          storeId: escrow.storeId,
+          payload: {
+            escrowId,
+            attempts: newRetryCount,
+            orderId: escrow.orderId,
+            storeId: escrow.storeId,
+          } as never,
+        },
+      });
+
       return { status: 'LOCK_FAILED' };
     }
 
@@ -241,6 +273,24 @@ export class EscrowService {
         data: { status: 'ESCROW_RELEASED' },
       });
 
+      // Emit event
+      await this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'escrow.released',
+          storeId: escrow.storeId,
+          providerId: escrow.providerId || undefined,
+          payload: {
+            escrowId,
+            providerAmount: escrow.providerAmount,
+            platformFee: escrow.platformFee,
+            txHash,
+            orderId: escrow.orderId,
+            storeId: escrow.storeId,
+            providerId: escrow.providerId,
+          } as never,
+        },
+      });
+
       this.logger.log(`Escrow ${escrowId} released: tx=${txHash}`);
       return { txHash };
     } catch (err) {
@@ -305,6 +355,23 @@ export class EscrowService {
         data: { status: 'REFUNDED' },
       });
 
+      // Emit event
+      await this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'escrow.refunded',
+          storeId: escrow.storeId,
+          providerId: escrow.providerId || undefined,
+          payload: {
+            escrowId,
+            amountUsdc: escrow.amountUsdc,
+            txHash,
+            orderId: escrow.orderId,
+            storeId: escrow.storeId,
+            providerId: escrow.providerId,
+          } as never,
+        },
+      });
+
       this.logger.log(`Escrow ${escrowId} refunded: tx=${txHash}`);
       return { txHash };
     } catch (err) {
@@ -360,6 +427,23 @@ export class EscrowService {
         data: { status: 'DISPUTED' },
       }),
     ]);
+
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'dispute.opened',
+        storeId: escrow.storeId,
+        providerId: escrow.providerId || undefined,
+        payload: {
+          disputeId: dispute.id,
+          escrowId,
+          raisedBy,
+          reason,
+          storeId: escrow.storeId,
+          providerId: escrow.providerId,
+        } as never,
+      },
+    });
 
     this.logger.log(`Dispute raised on escrow ${escrowId} by ${raisedBy}`);
     return { escrow: updatedEscrow, dispute };
@@ -435,6 +519,22 @@ export class EscrowService {
         data: { status: 'ESCROW_RELEASED' },
       }),
     ]);
+
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'dispute.resolved',
+        storeId: escrow.storeId,
+        providerId: escrow.providerId || undefined,
+        payload: {
+          escrowId,
+          providerPercent,
+          txHash,
+          storeId: escrow.storeId,
+          providerId: escrow.providerId,
+        } as never,
+      },
+    });
 
     this.logger.log(`Dispute resolved for escrow ${escrowId}: ${providerPercent}% to provider`);
     return { txHash };
@@ -527,6 +627,23 @@ export class EscrowService {
           data: {
             status: EscrowStatus.EXPIRED,
             refundTxHash: txHash,
+          },
+        });
+
+        // Emit event
+        await this.prisma.eventOutbox.create({
+          data: {
+            eventType: 'escrow.expired',
+            storeId: escrow.storeId,
+            providerId: escrow.providerId || undefined,
+            payload: {
+              escrowId: escrow.id,
+              amountUsdc: escrow.amountUsdc,
+              refundTxHash: txHash,
+              orderId: escrow.orderId,
+              storeId: escrow.storeId,
+              providerId: escrow.providerId,
+            } as never,
           },
         });
 

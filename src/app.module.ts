@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_GUARD } from '@nestjs/core';
 import configuration from './config/configuration';
 import { PrismaModule } from './prisma/prisma.module';
@@ -21,6 +22,11 @@ import { ProviderAuthModule } from './provider-auth/provider-auth.module';
 import { PricingModule } from './pricing/pricing.module';
 import { ShippingModule } from './shipping/shipping.module';
 import { ClipartModule } from './clipart/clipart.module';
+import { OutboxModule } from './outbox/outbox.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { WebhooksOutboundModule } from './webhooks-outbound/webhooks-outbound.module';
+import { SettingsModule } from './settings/settings.module';
+import { NotificationsCleanupModule } from './notifications-cleanup/notifications-cleanup.module';
 
 @Module({
   imports: [
@@ -29,6 +35,7 @@ import { ClipartModule } from './clipart/clipart.module';
       load: [configuration],
     }),
     ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot({ wildcard: false, maxListeners: 50, verboseMemoryLeak: false }),
     PrismaModule,
     StellarModule,
     ShopifyModule,
@@ -46,6 +53,11 @@ import { ClipartModule } from './clipart/clipart.module';
     PricingModule,
     ShippingModule,
     ClipartModule,
+    OutboxModule,
+    NotificationsModule,
+    WebhooksOutboundModule,
+    SettingsModule,
+    NotificationsCleanupModule,
   ],
   providers: [
     {

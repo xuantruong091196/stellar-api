@@ -76,7 +76,23 @@ export class OrdersService {
     );
 
     // ── Split into ProviderOrders by matching MerchantProduct ──
-    await this.createProviderOrders(order.id, storeId, payload);
+    const providerIds = await this.createProviderOrders(order.id, storeId, payload);
+
+    // Emit event for notifications + webhooks
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'order.created',
+        storeId,
+        payload: {
+          orderId: order.id,
+          shopifyOrderNumber,
+          customerName,
+          totalUsdc: totalPrice,
+          storeId,
+          providerIds,
+        } as never,
+      },
+    });
 
     return order;
   }
@@ -307,6 +323,19 @@ export class OrdersService {
     const updatedOrder = await orderUpdate;
     this.logger.log(`Order ${orderId} cancelled`);
 
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'order.cancelled',
+        storeId: order.storeId,
+        payload: {
+          orderId: order.id,
+          shopifyOrderNumber: order.shopifyOrderNumber,
+          storeId: order.storeId,
+        } as never,
+      },
+    });
+
     return updatedOrder;
   }
 
@@ -318,7 +347,7 @@ export class OrdersService {
     orderId: string,
     storeId: string,
     payload: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const lineItems =
       (payload.line_items as Array<Record<string, unknown>>) || [];
 
@@ -393,6 +422,7 @@ export class OrdersService {
 
     // Create a ProviderOrder per provider group
     const platformFeeRate = this.config.get<number>('pricing.platformFeeRate') || 0.05;
+    const providerIds: string[] = [];
 
     for (const [providerId, group] of providerGroups) {
       const platformFee = group.baseCostTotal * platformFeeRate;
@@ -407,10 +437,14 @@ export class OrdersService {
         },
       });
 
+      providerIds.push(providerId);
+
       this.logger.log(
         `ProviderOrder created: ${providerOrder.id} for provider ${providerId} (baseCost=${group.baseCostTotal})`,
       );
     }
+
+    return providerIds;
   }
 
   /**

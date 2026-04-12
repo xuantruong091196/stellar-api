@@ -41,6 +41,20 @@ export default () => ({
     apiKey: readSecret('EASYPOST_API_KEY'),
   },
 
+  resend: {
+    apiKey: readSecret('RESEND_API_KEY'),
+    fromEmail: process.env.RESEND_FROM_EMAIL || 'notifications@stelo.life',
+    replyTo: process.env.RESEND_REPLY_TO || 'noreply@stelo.life',
+  },
+
+  notifications: {
+    sseSessionTtlMs: parseInt(process.env.SSE_SESSION_TTL_MS || '3600000', 10), // 1h
+    emailDailyLimit: parseInt(process.env.EMAIL_DAILY_LIMIT || '90', 10), // soft limit before throttling
+    emailHardLimit: parseInt(process.env.EMAIL_HARD_LIMIT || '100', 10), // Resend free tier
+    webhookMaxFailures: parseInt(process.env.WEBHOOK_MAX_FAILURES || '50', 10),
+    webhookSecretGracePeriodMs: parseInt(process.env.WEBHOOK_SECRET_GRACE_MS || '86400000', 10), // 24h
+  },
+
   admin: {
     apiKey: readSecret('ADMIN_API_KEY'),
   },

@@ -15,6 +15,7 @@ const SECRET_NAME_MAP: Record<string, string> = {
   AWS_SECRET_ACCESS_KEY: 'aws_secret',
   ENCRYPTION_KEY: 'encryption_key',
   EASYPOST_API_KEY: 'easypost_api_key',
+  RESEND_API_KEY: 'resend_api_key',
   ADMIN_API_KEY: 'admin_api_key',
   PROVIDER_JWT_SECRET: 'provider_jwt_secret',
 };

@@ -258,6 +258,20 @@ export class ProductsService {
         `Product published to Shopify: ${product.title} → ${shopifyProductGid} (${variantIds.length} variants)`,
       );
 
+      // Emit event
+      await this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'product.published',
+          storeId: product.storeId,
+          payload: {
+            merchantProductId,
+            title: product.title,
+            shopifyProductId,
+            storeId: product.storeId,
+          } as never,
+        },
+      });
+
       return {
         ...updated,
         shopify: {
@@ -272,6 +286,20 @@ export class ProductsService {
       await this.prisma.merchantProduct.update({
         where: { id: merchantProductId },
         data: { status: 'draft' },
+      });
+
+      // Emit failure event
+      await this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'product.publish_failed',
+          storeId: product.storeId,
+          payload: {
+            merchantProductId,
+            title: product.title,
+            error: (err as Error).message,
+            storeId: product.storeId,
+          } as never,
+        },
       });
 
       this.logger.error(`Failed to publish product ${merchantProductId}: ${(err as Error).message}`);

@@ -52,6 +52,7 @@ model Store {
   storeProviders   StoreProvider[]
   webhookLogs      WebhookLog[]
   merchantProducts MerchantProduct[]
+  settings         StoreSettings?
 }
 
 model Provider {
@@ -88,6 +89,7 @@ model Provider {
   storeProviders   StoreProvider[]
   products         ProviderProduct[]
   providerOrders   ProviderOrder[]
+  settings         ProviderSettings?
 }
 
 model StoreProvider {
@@ -380,4 +382,170 @@ model ProviderOrder {
   @@index([providerId])
   @@index([status])
   @@map("provider_orders")
+}
+
+// ─── Settings + Notifications Platform ──────────────────────────────
+
+model StoreSettings {
+  id            String   @id @default(uuid())
+  storeId       String   @unique
+  // Store
+  storeName     String?
+  locale        String   @default("en") // 'en' | 'vi'
+  // Webhook
+  webhookUrl    String?
+  webhookSecret String?
+  webhookSecretPrev String?
+  webhookSecretRotatedAt DateTime?
+  webhookEvents String[] @default([])
+  webhookActiveSince DateTime?
+  webhookFailureCount Int @default(0)
+  webhookDisabledAt   DateTime?
+  webhookDisabledReason String?
+  // Pricing
+  defaultMarkup Float    @default(30)
+  // Category toggles (6 categories)
+  notifyOrders   Boolean @default(true)
+  notifyEscrow   Boolean @default(true)
+  notifyShipping Boolean @default(true)
+  notifyDisputes Boolean @default(true)
+  notifyProducts Boolean @default(true)
+  notifySystem   Boolean @default(true)
+  // Channel toggles
+  notificationEmail String?
+  emailEnabled      Boolean @default(true)
+  inAppEnabled      Boolean @default(true)
+  webhookEnabled    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@map("store_settings")
+}
+
+model ProviderSettings {
+  id            String   @id @default(uuid())
+  providerId    String   @unique
+  locale        String   @default("en")
+  // Webhook
+  webhookUrl    String?
+  webhookSecret String?
+  webhookSecretPrev String?
+  webhookSecretRotatedAt DateTime?
+  webhookFailureCount Int @default(0)
+  webhookDisabledAt   DateTime?
+  webhookDisabledReason String?
+  // Category toggles
+  notifyNewOrders     Boolean @default(true)
+  notifyOrderCancelled Boolean @default(true)
+  notifyEscrowReleased Boolean @default(true)
+  notifyDisputes      Boolean @default(true)
+  notifySystem        Boolean @default(true)
+  // Channel toggles
+  notificationEmail String?
+  emailEnabled      Boolean @default(true)
+  inAppEnabled      Boolean @default(true)
+  webhookEnabled    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  provider  Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@map("provider_settings")
+}
+
+model Notification {
+  id            String   @id @default(uuid())
+  // Polymorphic recipient — exactly ONE of these
+  recipientType String   // 'store' | 'provider'
+  recipientId   String
+  // Idempotency
+  eventId       String?  // EventOutbox.id
+  type          String   // 'order_created', etc.
+  category      String   // 'orders' | 'escrow' | 'shipping' | 'disputes' | 'products' | 'system'
+  title         String
+  message       String
+  payload       Json
+  link          String?
+  // Actor + relation tracking
+  actorType     String?
+  actorId       String?
+  relatedType   String?
+  relatedId     String?
+  // Grouping
+  groupKey      String?
+  // Lifecycle
+  readAt        DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([eventId, recipientType, recipientId])
+  @@index([recipientType, recipientId, readAt])
+  @@index([recipientType, recipientId, createdAt])
+  @@index([recipientType, recipientId, groupKey])
+  @@index([relatedType, relatedId])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model WebhookDelivery {
+  id              String   @id @default(uuid())
+  requestId       String   @default(uuid()) @unique
+  recipientType   String   // 'store' | 'provider'
+  recipientId     String
+  notificationId  String?
+  url             String
+  eventType       String
+  payload         Json
+  signature       String?
+  status          String   @default("pending") // pending | success | failed | retrying
+  attempts        Int      @default(0)
+  maxAttempts     Int      @default(5)
+  lastAttemptAt   DateTime?
+  nextRetryAt     DateTime?
+  responseStatus  Int?
+  responseBody    String?
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([recipientType, recipientId, createdAt])
+  @@index([status, nextRetryAt])
+  @@index([requestId])
+  @@index([createdAt])
+  @@map("webhook_deliveries")
+}
+
+model EventOutbox {
+  id          String   @id @default(uuid())
+  eventType   String
+  payload     Json
+  storeId     String?
+  providerId  String?
+  status      String   @default("pending") // pending | processing | processed | failed
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(5)
+  lastError   String?
+  createdAt   DateTime @default(now())
+  processedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([eventType])
+  @@index([storeId])
+  @@index([providerId])
+  @@index([processedAt])
+  @@map("event_outbox")
+}
+
+model NotificationSession {
+  id            String   @id @default(uuid())
+  recipientType String   // 'store' | 'provider'
+  recipientId   String
+  token         String   @unique
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([token, expiresAt])
+  @@index([expiresAt])
+  @@map("notification_sessions")
 }

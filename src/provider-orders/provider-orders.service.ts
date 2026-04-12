@@ -275,6 +275,24 @@ export class ProviderOrdersService {
       );
     }
 
+    // Emit event
+    await this.prisma.eventOutbox.create({
+      data: {
+        eventType: 'provider_order.shipped',
+        storeId: order.storeId,
+        providerId: providerOrder.providerId,
+        payload: {
+          providerOrderId,
+          orderId: order.id,
+          trackingNumber,
+          trackingUrl: trackingUrl || null,
+          company: company || null,
+          storeId: order.storeId,
+          providerId: providerOrder.providerId,
+        } as never,
+      },
+    });
+
     return updated;
   }
 

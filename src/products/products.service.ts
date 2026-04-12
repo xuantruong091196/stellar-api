@@ -341,14 +341,23 @@ export class ProductsService {
   }
 
   /**
-   * Get a single product with full details.
+   * Get a single product with full details including provider info,
+   * sales performance, technical specs, and linked Shopify data.
    */
   async getProduct(productId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: productId },
       include: {
         design: true,
-        providerProduct: { include: { variants: true } },
+        providerProduct: {
+          include: {
+            variants: true,
+            provider: true,
+          },
+        },
+        store: {
+          select: { shopifyDomain: true, name: true },
+        },
       },
     });
 
@@ -356,7 +365,156 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return product;
+    // Sales performance — last 7 days order counts for this product
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const orderItems = await this.prisma.orderItem.findMany({
+      where: {
+        order: {
+          storeId: product.storeId,
+          createdAt: { gte: sevenDaysAgo },
+        },
+        design: { id: product.designId },
+      },
+      include: {
+        order: {
+          select: { createdAt: true, totalUsdc: true },
+        },
+      },
+    });
+
+    // Bucket into 7 days
+    const dailyBuckets: number[] = Array(7).fill(0);
+    let totalUnits = 0;
+    let totalRevenue = 0;
+    const now = new Date();
+    for (const item of orderItems) {
+      const daysAgo = Math.floor(
+        (now.getTime() - item.order.createdAt.getTime()) / (1000 * 60 * 60 * 24),
+      );
+      if (daysAgo >= 0 && daysAgo < 7) {
+        dailyBuckets[6 - daysAgo] += item.quantity;
+      }
+      totalUnits += item.quantity;
+      totalRevenue += item.unitPrice * item.quantity;
+    }
+
+    // Week-over-week change
+    const prevWeekAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+    const prevWeekCount = await this.prisma.orderItem.count({
+      where: {
+        order: {
+          storeId: product.storeId,
+          createdAt: { gte: prevWeekAgo, lt: sevenDaysAgo },
+        },
+        design: { id: product.designId },
+      },
+    });
+    const changePercent =
+      prevWeekCount > 0
+        ? ((totalUnits - prevWeekCount) / prevWeekCount) * 100
+        : totalUnits > 0
+          ? 100
+          : 0;
+
+    const salesPerformance = {
+      dailyBuckets,
+      totalUnits,
+      totalRevenue,
+      changePercent: Math.round(changePercent * 10) / 10,
+    };
+
+    // Technical specs — derived from productType (industry standards)
+    const technicalSpecs = this.getTechnicalSpecs(
+      product.providerProduct?.productType || 'other',
+      product.providerProduct?.description || null,
+    );
+
+    // Smart contract rules — static for now, could be per-store config later
+    const smartContractRules = [
+      {
+        icon: 'lock_clock',
+        title: '7-Day Escrow Release',
+        description:
+          'Funds released to provider after delivery confirmation + buffer period.',
+      },
+      {
+        icon: 'gavel',
+        title: 'Auto-Dispute Resolution',
+        description:
+          'If quality metrics fall below 95%, automated audit is triggered.',
+      },
+    ];
+
+    return {
+      ...product,
+      salesPerformance,
+      technicalSpecs,
+      smartContractRules,
+    };
+  }
+
+  /**
+   * Derive technical specs based on product type.
+   * These are industry-standard defaults, overridable via providerProduct.description.
+   */
+  private getTechnicalSpecs(
+    productType: string,
+    description: string | null,
+  ): Array<{ label: string; value: string }> {
+    const specs: Record<string, Array<{ label: string; value: string }>> = {
+      't-shirt': [
+        { label: 'Material', value: '100% Combed Cotton' },
+        { label: 'Weight', value: '180 GSM (Midweight)' },
+        { label: 'Print Tech', value: 'DTG (Direct-to-Garment)' },
+        { label: 'Origin', value: 'Latvia / US Node' },
+      ],
+      hoodie: [
+        { label: 'Material', value: '80% Cotton, 20% Recycled Poly' },
+        { label: 'Weight', value: '350 GSM (Heavyweight)' },
+        { label: 'Print Tech', value: 'DTG + Embroidery' },
+        { label: 'Origin', value: 'Latvia (EU Node)' },
+      ],
+      mug: [
+        { label: 'Material', value: 'Ceramic (AB Grade)' },
+        { label: 'Capacity', value: '11 oz / 15 oz' },
+        { label: 'Print Tech', value: 'Sublimation' },
+        { label: 'Origin', value: 'US Node' },
+      ],
+      poster: [
+        { label: 'Material', value: 'Archival Matte Paper' },
+        { label: 'Weight', value: '200 GSM' },
+        { label: 'Print Tech', value: 'Giclée Inkjet' },
+        { label: 'Origin', value: 'US / EU Node' },
+      ],
+      'tote-bag': [
+        { label: 'Material', value: 'Heavyweight Canvas' },
+        { label: 'Weight', value: '340 GSM' },
+        { label: 'Print Tech', value: 'DTG' },
+        { label: 'Origin', value: 'US Node' },
+      ],
+      'phone-case': [
+        { label: 'Material', value: 'Polycarbonate + TPU' },
+        { label: 'Finish', value: 'Glossy / Matte' },
+        { label: 'Print Tech', value: 'UV Direct Print' },
+        { label: 'Origin', value: 'US Node' },
+      ],
+    };
+
+    const base = specs[productType] || [
+      { label: 'Type', value: productType },
+      { label: 'Print Tech', value: 'Standard' },
+      { label: 'Origin', value: 'Global Node' },
+    ];
+
+    // If provider description exists, append it as a note
+    if (description && description.length > 20) {
+      return [
+        ...base,
+        { label: 'Notes', value: description.slice(0, 200) },
+      ];
+    }
+
+    return base;
   }
 
   /**

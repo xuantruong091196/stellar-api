@@ -3,10 +3,25 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProviderProductDto } from './dto/create-provider-product.dto';
 import { UpdateProviderProductDto } from './dto/update-provider-product.dto';
 import { QueryProviderProductsDto } from './dto/query-provider-products.dto';
+
+/** POD product categories we want to sync */
+const WANTED_TYPES = ['t-shirt', 'hoodie', 'mug', 'poster', 'tote-bag', 'phone-case', 'tank', 'sweatshirt'];
+
+function classifyProductType(typeName: string): string {
+  const t = (typeName || '').toLowerCase();
+  if (t.includes('hoodie') || t.includes('hooded') || t.includes('sweatshirt') || t.includes('crewneck')) return 'hoodie';
+  if (t.includes('mug') || t.includes('tumbler')) return 'mug';
+  if (t.includes('poster') || t.includes('canvas print') || t.includes('framed')) return 'poster';
+  if (t.includes('tote') || t.includes('bag')) return 'tote-bag';
+  if (t.includes('phone') || t.includes('case')) return 'phone-case';
+  if (t.includes('t-shirt') || t.includes('tee') || t.includes('tank')) return 't-shirt';
+  return 'other';
+}
 
 @Injectable()
 export class ProviderProductsService {
@@ -262,5 +277,185 @@ export class ProviderProductsService {
 
     this.logger.log(`Variant ${variantId} stock updated to ${inStock}`);
     return updated;
+  }
+
+  /**
+   * Weekly cron: sync catalog from external providers (Printful, Printify).
+   * Runs every Sunday at 3:00 AM UTC.
+   * Fetches new products, updates prices, adds images for products missing them.
+   */
+  @Cron('0 3 * * 0') // Sunday 3AM UTC
+  async syncExternalCatalogs() {
+    this.logger.log('Starting weekly catalog sync...');
+
+    const providers = await this.prisma.provider.findMany({
+      where: {
+        integrationType: { in: ['printful', 'printify'] },
+        integrationStatus: 'active',
+        apiToken: { not: null },
+      },
+    });
+
+    for (const provider of providers) {
+      try {
+        if (provider.integrationType === 'printful') {
+          await this.syncPrintfulCatalog(provider.id, provider.apiToken!);
+        }
+        // TODO: add syncPrintifyCatalog when needed
+      } catch (err) {
+        this.logger.error(
+          `Catalog sync failed for provider ${provider.name}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    this.logger.log('Weekly catalog sync complete');
+  }
+
+  /**
+   * Sync products from Printful API.
+   * - Adds new products not yet in DB (matched by externalProductId)
+   * - Updates blankImages for existing products missing images
+   * - Updates baseCost if price changed
+   */
+  private async syncPrintfulCatalog(providerId: string, apiToken: string) {
+    this.logger.log(`Syncing Printful catalog for provider ${providerId}`);
+
+    // Fetch full Printful product catalog
+    const catalogRes = await fetch('https://api.printful.com/products', {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+
+    if (!catalogRes.ok) {
+      throw new Error(`Printful API error: ${catalogRes.status}`);
+    }
+
+    const catalog = (await catalogRes.json()) as {
+      result: Array<{
+        id: number;
+        title: string;
+        type_name: string;
+        image: string;
+      }>;
+    };
+
+    // Get existing externalProductIds for this provider
+    const existing = await this.prisma.providerProduct.findMany({
+      where: { providerId },
+      select: { id: true, externalProductId: true, blankImages: true },
+    });
+    const existingMap = new Map(
+      existing.map((p) => [p.externalProductId, p]),
+    );
+
+    let added = 0;
+    let updated = 0;
+
+    for (const product of catalog.result) {
+      const productType = classifyProductType(product.type_name);
+
+      // Skip unwanted types
+      if (!WANTED_TYPES.includes(productType)) continue;
+
+      const externalId = String(product.id);
+      const existingProduct = existingMap.get(externalId);
+
+      if (existingProduct) {
+        // Update images if missing
+        const images = existingProduct.blankImages as Record<string, string>;
+        if (!images || Object.keys(images).length === 0) {
+          const detail = await this.fetchPrintfulProductDetail(apiToken, product.id);
+          if (detail.images && Object.keys(detail.images).length > 0) {
+            await this.prisma.providerProduct.update({
+              where: { id: existingProduct.id },
+              data: {
+                blankImages: detail.images,
+                syncedAt: new Date(),
+              },
+            });
+            updated++;
+          }
+        }
+        continue;
+      }
+
+      // New product — fetch details and insert
+      const detail = await this.fetchPrintfulProductDetail(apiToken, product.id);
+
+      await this.prisma.providerProduct.create({
+        data: {
+          providerId,
+          productType,
+          name: product.title,
+          baseCost: detail.baseCost,
+          printAreas: [{ name: 'front', widthPx: 4200, heightPx: 4800, dpi: 300 }],
+          blankImages: detail.images,
+          isActive: true,
+          externalProductId: externalId,
+          syncedAt: new Date(),
+        },
+      });
+      added++;
+
+      // Rate limit: Printful allows ~5 req/sec
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    // Update provider lastSyncedAt
+    await this.prisma.provider.update({
+      where: { id: providerId },
+      data: { lastSyncedAt: new Date(), syncError: null },
+    });
+
+    this.logger.log(
+      `Printful sync complete: ${added} new products, ${updated} updated`,
+    );
+  }
+
+  /**
+   * Fetch detailed product info (price + variant images) from Printful.
+   */
+  private async fetchPrintfulProductDetail(
+    apiToken: string,
+    productId: number,
+  ): Promise<{ baseCost: number; images: Record<string, string> }> {
+    const res = await fetch(`https://api.printful.com/products/${productId}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+
+    if (!res.ok) {
+      return { baseCost: 0, images: {} };
+    }
+
+    const data = (await res.json()) as {
+      result: {
+        product: { image: string };
+        variants: Array<{
+          price: string;
+          color: string;
+          image: string;
+        }>;
+      };
+    };
+
+    const variants = data.result?.variants || [];
+    const baseCost = variants.length > 0 ? parseFloat(variants[0].price) : 0;
+
+    // Collect one image per color
+    const images: Record<string, string> = {};
+    for (const v of variants) {
+      if (v.image && v.color && !images[v.color]) {
+        images[v.color] = v.image;
+      }
+      // Limit to 10 colors per product
+      if (Object.keys(images).length >= 10) break;
+    }
+
+    // Fallback to product main image
+    if (Object.keys(images).length === 0 && data.result?.product?.image) {
+      images['Default'] = data.result.product.image;
+    }
+
+    return { baseCost, images };
   }
 }

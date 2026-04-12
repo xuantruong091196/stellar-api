@@ -99,6 +99,31 @@ export class ProductsService {
       `Draft product created: ${product.id} (${dto.title}), margin: $${profitMargin.toFixed(2)}`,
     );
 
+    // Generate composite mockups async (fire and forget — don't block response)
+    if (design.fileUrl && providerProduct.blankImages) {
+      const blanks = providerProduct.blankImages as Record<string, string>;
+      if (Object.keys(blanks).length > 0) {
+        this.mockupService
+          .generateProductMockups({
+            designId: design.id,
+            designUrl: design.fileUrl,
+            blankImages: blanks,
+            printConfig: dto.printConfig,
+            productType: providerProduct.productType,
+          })
+          .then((mockups) => {
+            this.logger.log(
+              `Generated ${mockups.length} mockups for product ${product.id}`,
+            );
+          })
+          .catch((err) => {
+            this.logger.error(
+              `Mockup generation failed for product ${product.id}: ${(err as Error).message}`,
+            );
+          });
+      }
+    }
+
     return {
       ...product,
       providerProduct: {
@@ -348,7 +373,13 @@ export class ProductsService {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: productId },
       include: {
-        design: true,
+        design: {
+          include: {
+            mockups: {
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+        },
         providerProduct: {
           include: {
             variants: true,
@@ -363,6 +394,41 @@ export class ProductsService {
 
     if (!product) {
       throw new NotFoundException('Product not found');
+    }
+
+    // Auto-generate mockups if missing (async, don't block response)
+    const hasMockups =
+      product.design?.mockups?.some(
+        (m) => m.productType === product.providerProduct?.productType,
+      ) ?? false;
+
+    if (
+      !hasMockups &&
+      product.design?.fileUrl &&
+      product.providerProduct?.blankImages
+    ) {
+      const blanks = product.providerProduct.blankImages as Record<string, string>;
+      if (Object.keys(blanks).length > 0) {
+        this.mockupService
+          .generateProductMockups({
+            designId: product.designId,
+            designUrl: product.design.fileUrl,
+            blankImages: blanks,
+            printConfig: product.printConfig as {
+              printArea: string;
+              x: number;
+              y: number;
+              scale: number;
+              rotation: number;
+            },
+            productType: product.providerProduct.productType,
+          })
+          .catch((err) => {
+            this.logger.error(
+              `Background mockup generation failed for ${productId}: ${(err as Error).message}`,
+            );
+          });
+      }
     }
 
     // Sales performance — last 7 days order counts for this product

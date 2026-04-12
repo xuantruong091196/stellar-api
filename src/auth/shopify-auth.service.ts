@@ -271,7 +271,8 @@ export class ShopifyAuthService {
       nodeEnv === 'production'
         ? `https://api.stelo.life`
         : `http://localhost:${port}`;
-    return `${host}/auth/callback`;
+    // Must match Allowed redirection URL(s) registered in Shopify Dev Dashboard
+    return `${host}/auth/shopify/callback`;
   }
 
   private buildWebhookCallbackUrl(): string {

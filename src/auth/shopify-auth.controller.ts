@@ -12,7 +12,7 @@ import { ShopifyAuthService } from './shopify-auth.service';
 import { Public } from './decorators/public.decorator';
 
 @ApiTags('auth')
-@Controller('auth')
+@Controller('auth/shopify')
 export class ShopifyAuthController {
   private readonly logger = new Logger(ShopifyAuthController.name);
 

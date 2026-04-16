@@ -2,12 +2,38 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
+import { ProvidersService } from '../providers/providers.service';
 import { CreateProviderProductDto } from './dto/create-provider-product.dto';
 import { UpdateProviderProductDto } from './dto/update-provider-product.dto';
 import { QueryProviderProductsDto } from './dto/query-provider-products.dto';
+
+/**
+ * Verify every value in a blankImages map is an http(s) URL. class-validator
+ * doesn't inspect record values for us, and these URLs are fetched server-side
+ * during mockup generation — a javascript:, data:, or file: URI would break
+ * the sharp pipeline (at best) and pollute logs with scary errors (at worst).
+ */
+function assertBlankImagesValid(
+  blankImages: Record<string, string> | undefined,
+): void {
+  if (!blankImages) return;
+  for (const [color, url] of Object.entries(blankImages)) {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      throw new BadRequestException(
+        `blankImages["${color}"] must be an http(s) URL`,
+      );
+    }
+    if (url.length > 2048) {
+      throw new BadRequestException(
+        `blankImages["${color}"] URL too long (max 2048 chars)`,
+      );
+    }
+  }
+}
 
 /** POD product categories we want to sync */
 const WANTED_TYPES = ['t-shirt', 'hoodie', 'mug', 'poster', 'tote-bag', 'phone-case', 'tank', 'sweatshirt'];
@@ -27,12 +53,17 @@ function classifyProductType(typeName: string): string {
 export class ProviderProductsService {
   private readonly logger = new Logger(ProviderProductsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly providers: ProvidersService,
+  ) {}
 
   /**
    * Create a provider product with variants in a transaction.
    */
   async create(dto: CreateProviderProductDto) {
+    assertBlankImagesValid(dto.blankImages);
+
     const { variants, ...productData } = dto;
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -46,7 +77,7 @@ export class ProviderProductsService {
           baseCost: productData.baseCost,
           printAreas: productData.printAreas as any,
           blankImages: productData.blankImages as any,
-          sizeChart: productData.sizeChart ?? undefined,
+          sizeChart: (productData.sizeChart ?? undefined) as any,
           weightGrams: productData.weightGrams,
           productionDays: productData.productionDays ?? 3,
         },
@@ -79,6 +110,10 @@ export class ProviderProductsService {
    * Update a product and optionally upsert variants.
    */
   async update(id: string, dto: UpdateProviderProductDto) {
+    if (dto.blankImages !== undefined) {
+      assertBlankImagesValid(dto.blankImages);
+    }
+
     const existing = await this.prisma.providerProduct.findUnique({
       where: { id },
     });
@@ -298,8 +333,21 @@ export class ProviderProductsService {
 
     for (const provider of providers) {
       try {
+        // Decrypt the stored apiToken (AES-256-GCM ciphertext in the DB;
+        // legacy plaintext rows pass through with a warning) before
+        // handing it to the upstream API.
+        const plaintextToken = this.providers.decryptProviderToken(
+          provider.apiToken,
+        );
+        if (!plaintextToken) {
+          this.logger.warn(
+            `Provider ${provider.id} has no apiToken after decrypt, skipping`,
+          );
+          continue;
+        }
+
         if (provider.integrationType === 'printful') {
-          await this.syncPrintfulCatalog(provider.id, provider.apiToken!);
+          await this.syncPrintfulCatalog(provider.id, plaintextToken);
         }
         // TODO: add syncPrintifyCatalog when needed
       } catch (err) {
@@ -439,21 +487,33 @@ export class ProviderProductsService {
     };
 
     const variants = data.result?.variants || [];
-    const baseCost = variants.length > 0 ? parseFloat(variants[0].price) : 0;
+    // Base cost = cheapest finite variant price. Filter malformed/negative
+    // values so a bad upstream response doesn't plant NaN or Infinity
+    // into the DB (which Prisma would then throw on at write time).
+    const parsedPrices = variants
+      .map((v) => parseFloat(v.price || ''))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    const baseCost = parsedPrices.length > 0 ? Math.min(...parsedPrices) : 0;
 
-    // Collect one image per color
+    // Collect one image per color — only keep http(s) URLs so downstream
+    // mockup generation (safeImageFetch) doesn't have to reject them.
     const images: Record<string, string> = {};
     for (const v of variants) {
-      if (v.image && v.color && !images[v.color]) {
+      if (v.image && v.color && !images[v.color] && /^https?:\/\//i.test(v.image)) {
         images[v.color] = v.image;
       }
       // Limit to 10 colors per product
       if (Object.keys(images).length >= 10) break;
     }
 
-    // Fallback to product main image
-    if (Object.keys(images).length === 0 && data.result?.product?.image) {
-      images['Default'] = data.result.product.image;
+    // Fallback to product main image (also validated)
+    const fallback = data.result?.product?.image;
+    if (
+      Object.keys(images).length === 0 &&
+      typeof fallback === 'string' &&
+      /^https?:\/\//i.test(fallback)
+    ) {
+      images['Default'] = fallback;
     }
 
     return { baseCost, images };

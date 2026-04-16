@@ -29,6 +29,7 @@ enum EscrowStatus {
   RELEASING
   RELEASED
   DISPUTED
+  REFUNDING
   REFUNDED
   EXPIRED
 }
@@ -42,6 +43,9 @@ model Store {
   name           String
   email          String
   plan           String   @default("free")
+  // Owner wallet used for SIWS auth. Unique — one wallet = one store.
+  walletAddress  String?  @unique
+  // Payout destination for escrow releases. Defaults to walletAddress on link; editable.
   stellarAddress String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -59,7 +63,7 @@ model Provider {
   id             String   @id @default(uuid())
   name           String
   country        String
-  contactEmail   String
+  contactEmail   String   @unique
   stellarAddress String
   verified       Boolean  @default(false)
   rating         Float    @default(0)
@@ -77,8 +81,13 @@ model Provider {
   // External provider integration
   integrationType   String?   // 'printful' | 'printify' | 'gooten' | 'manual'
   externalId        String?   // Provider's own merchant/shop ID
-  apiToken          String?   // Encrypted API token for the external service
-  apiSecret         String?   // Encrypted API secret (if needed)
+  // AES-256-GCM ciphertext (format: iv:authTag:ciphertext, all hex).
+  // Encrypted at write time by ProvidersService.setupIntegration; decrypted
+  // on use via ProvidersService.decryptProviderToken. Legacy plaintext rows
+  // from before encryption was wired up are tolerated but logged as a
+  // warning — re-running setupIntegration re-encrypts them.
+  apiToken          String?
+  apiSecret         String?
   webhookSecret     String?   // For verifying incoming webhooks
   integrationStatus String?   @default("pending") // pending | active | paused | error
   lastSyncedAt      DateTime?

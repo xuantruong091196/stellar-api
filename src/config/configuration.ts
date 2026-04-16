@@ -55,6 +55,17 @@ export default () => ({
     webhookSecretGracePeriodMs: parseInt(process.env.WEBHOOK_SECRET_GRACE_MS || '86400000', 10), // 24h
   },
 
+  app: {
+    publicUrl: process.env.PUBLIC_APP_URL || 'http://localhost:3000',
+    /**
+     * Shared secret the Remix frontend attaches to every wallet-authenticated
+     * request via X-Stelo-Proxy-Secret. The API guard requires this to accept
+     * an X-Wallet-Address header — without it, any HTTP client could claim
+     * ownership of any wallet. Leave unset in local dev; MUST be set in prod.
+     */
+    proxySecret: process.env.STELO_PROXY_SECRET || '',
+  },
+
   admin: {
     apiKey: readSecret('ADMIN_API_KEY'),
   },
@@ -64,7 +75,15 @@ export default () => ({
   },
 
   providerAuth: {
-    jwtSecret: readSecret('PROVIDER_JWT_SECRET') || 'provider-jwt-dev-secret',
+    // Dev fallback only — in production, bootstrap fails fast if this
+    // secret is missing, so the fallback can never be used there. Keeping
+    // a dev default means local `pnpm dev` / docker-compose-up just works
+    // without a .env copy step.
+    jwtSecret:
+      readSecret('PROVIDER_JWT_SECRET') ||
+      (process.env.NODE_ENV === 'production'
+        ? ''
+        : 'provider-jwt-dev-secret-change-me'),
     jwtExpiresIn: process.env.PROVIDER_JWT_EXPIRES_IN || '24h',
   },
 

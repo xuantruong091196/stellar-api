@@ -6,8 +6,10 @@ import {
   Param,
   Query,
   Body,
+  Req,
   HttpCode,
   HttpStatus,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -24,20 +26,28 @@ import { QueryDesignsDto } from './dto/query-designs.dto';
 export class DesignsController {
   constructor(private readonly designsService: DesignsService) {}
 
+  private requireStoreId(req: any): string {
+    const id = req.store?.id as string | undefined;
+    if (!id) {
+      throw new ForbiddenException('Store authentication required');
+    }
+    return id;
+  }
+
   @Post(':storeId')
   @ApiOperation({ summary: 'Upload a new design' })
-  @ApiParam({ name: 'storeId', description: 'Store ID' })
+  @ApiParam({ name: 'storeId', description: 'Ignored — derived from auth context' })
   @ApiResponse({ status: 201, description: 'Design uploaded successfully' })
   @ApiResponse({ status: 400, description: 'Invalid input' })
   async uploadDesign(
-    @Param('storeId') storeId: string,
     @Body() dto: UploadDesignDto,
+    @Req() req: any,
   ) {
-    // Convert base64 to buffer
+    const callerStoreId = this.requireStoreId(req);
     const buffer = Buffer.from(dto.fileBase64, 'base64');
 
     return this.designsService.uploadDesign(
-      storeId,
+      callerStoreId,
       {
         buffer,
         originalname: dto.filename,
@@ -50,13 +60,13 @@ export class DesignsController {
 
   @Get(':storeId')
   @ApiOperation({ summary: 'Get all designs for a store' })
-  @ApiParam({ name: 'storeId', description: 'Store ID' })
+  @ApiParam({ name: 'storeId', description: 'Ignored — derived from auth context' })
   @ApiResponse({ status: 200, description: 'List of designs with pagination' })
   async getDesigns(
-    @Param('storeId') storeId: string,
     @Query() query: QueryDesignsDto,
+    @Req() req: any,
   ) {
-    return this.designsService.getDesigns(storeId, {
+    return this.designsService.getDesigns(this.requireStoreId(req), {
       page: query.page,
       limit: query.limit,
     });
@@ -67,8 +77,11 @@ export class DesignsController {
   @ApiParam({ name: 'designId', description: 'Design ID' })
   @ApiResponse({ status: 200, description: 'Design details' })
   @ApiResponse({ status: 404, description: 'Design not found' })
-  async getDesign(@Param('designId') designId: string) {
-    return this.designsService.getDesign(designId);
+  async getDesign(@Param('designId') designId: string, @Req() req: any) {
+    const callerStoreId = this.requireStoreId(req);
+    const design = await this.designsService.getDesign(designId);
+    if (design.storeId !== callerStoreId) throw new ForbiddenException();
+    return design;
   }
 
   @Delete(':designId')
@@ -77,7 +90,10 @@ export class DesignsController {
   @ApiParam({ name: 'designId', description: 'Design ID' })
   @ApiResponse({ status: 200, description: 'Design deleted successfully' })
   @ApiResponse({ status: 404, description: 'Design not found' })
-  async deleteDesign(@Param('designId') designId: string) {
+  async deleteDesign(@Param('designId') designId: string, @Req() req: any) {
+    const callerStoreId = this.requireStoreId(req);
+    const design = await this.designsService.getDesign(designId);
+    if (design.storeId !== callerStoreId) throw new ForbiddenException();
     return this.designsService.deleteDesign(designId);
   }
 }

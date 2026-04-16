@@ -137,13 +137,25 @@ export class ShippingService {
 
     const shipment = await Promise.race([shipmentPromise, timeoutPromise]);
 
-    return (shipment.rates || []).map((rate: any) => ({
-      service_name: rate.service,
-      service_code: `${rate.carrier}_${rate.service}`.toLowerCase().replace(/\s+/g, '_'),
-      total_price: Math.round(parseFloat(rate.rate) * 100),
-      currency: rate.currency || 'USD',
-      description: `${rate.carrier} ${rate.service} - estimated ${rate.delivery_days ?? 'N/A'} day(s)`,
-    }));
+    // Filter out any rate whose price doesn't parse as a finite positive
+    // number. Sending a malformed/NaN total_price back to Shopify's carrier
+    // service would either break checkout entirely or quote "$NaN" to the
+    // customer — neither is recoverable.
+    return (shipment.rates || [])
+      .map((rate: any) => {
+        const parsed = parseFloat(rate.rate);
+        if (!Number.isFinite(parsed) || parsed < 0) return null;
+        return {
+          service_name: rate.service,
+          service_code: `${rate.carrier}_${rate.service}`
+            .toLowerCase()
+            .replace(/\s+/g, '_'),
+          total_price: Math.round(parsed * 100),
+          currency: rate.currency || 'USD',
+          description: `${rate.carrier} ${rate.service} - estimated ${rate.delivery_days ?? 'N/A'} day(s)`,
+        };
+      })
+      .filter((r: any): r is ShopifyCarrierRate => r !== null);
   }
 
   /**

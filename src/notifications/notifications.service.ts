@@ -45,8 +45,19 @@ interface SettingsLike {
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
 
-  /** SSE subject map: key = `${recipientType}:${recipientId}`, value = subject */
-  private sseStreams = new Map<string, Subject<MessageEvent>>();
+  /**
+   * SSE subject map — one Set<Subject> per recipient key.
+   *
+   * A recipient may have multiple concurrent connections (separate tabs,
+   * mobile + desktop, etc.). Each connection gets its own Subject. When a
+   * connection closes (via finalize in the controller) we remove just
+   * that Subject from the Set, and when the Set becomes empty we drop the
+   * key so the Map doesn't grow unbounded with orphaned keys.
+   *
+   * `pushToSse` iterates over every Subject in the Set so every tab sees
+   * the new notification.
+   */
+  private sseStreams = new Map<string, Set<Subject<MessageEvent>>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -200,36 +211,48 @@ export class NotificationsService {
 
   // ─── SSE Stream Management ────────────────────────────────────────
 
-  /** Get or create an SSE subject for a recipient. */
-  getStream(recipientType: RecipientType, recipientId: string): Subject<MessageEvent> {
+  /**
+   * Register a new SSE connection. Returns the Subject the controller
+   * should stream to the client, plus a `close()` callback the controller
+   * must call on `finalize` when the connection terminates.
+   */
+  openStream(
+    recipientType: RecipientType,
+    recipientId: string,
+  ): { subject: Subject<MessageEvent>; close: () => void } {
     const key = `${recipientType}:${recipientId}`;
-    let subject = this.sseStreams.get(key);
-    if (!subject) {
-      subject = new Subject<MessageEvent>();
-      this.sseStreams.set(key, subject);
+    let set = this.sseStreams.get(key);
+    if (!set) {
+      set = new Set();
+      this.sseStreams.set(key, set);
     }
-    return subject;
-  }
+    const subject = new Subject<MessageEvent>();
+    set.add(subject);
 
-  /** Close an SSE stream when client disconnects. */
-  closeStream(recipientType: RecipientType, recipientId: string) {
-    const key = `${recipientType}:${recipientId}`;
-    const subject = this.sseStreams.get(key);
-    if (subject) {
+    const close = () => {
+      const current = this.sseStreams.get(key);
+      if (!current) return;
+      current.delete(subject);
       subject.complete();
-      this.sseStreams.delete(key);
-    }
+      if (current.size === 0) {
+        this.sseStreams.delete(key);
+      }
+    };
+
+    return { subject, close };
   }
 
-  /** Push a new notification to an active SSE stream. */
+  /** Push a new notification to every active SSE stream for a recipient. */
   private pushToSse(recipientType: RecipientType, recipientId: string, notification: unknown) {
     const key = `${recipientType}:${recipientId}`;
-    const subject = this.sseStreams.get(key);
-    if (subject) {
-      subject.next({
-        type: 'notification',
-        data: JSON.stringify(notification),
-      } as unknown as MessageEvent);
+    const set = this.sseStreams.get(key);
+    if (!set || set.size === 0) return;
+    const event = {
+      type: 'notification',
+      data: JSON.stringify(notification),
+    } as unknown as MessageEvent;
+    for (const subject of set) {
+      subject.next(event);
     }
   }
 

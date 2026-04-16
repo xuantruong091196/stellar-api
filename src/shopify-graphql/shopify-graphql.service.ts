@@ -46,8 +46,16 @@ export class ShopifyGraphqlService {
       });
 
       if (response.status === 429) {
-        // Rate limited — wait and retry
-        const retryAfter = parseFloat(response.headers.get('Retry-After') || '2');
+        // Rate limited — wait and retry. Shopify returns `Retry-After` in
+        // seconds but we clamp to [0.5s, 30s] in case the header is
+        // missing, malformed (parseFloat → NaN), zero, or absurdly large
+        // (which would hang the caller forever).
+        const header = response.headers.get('Retry-After') || '2';
+        const parsed = parseFloat(header);
+        const retryAfter =
+          Number.isFinite(parsed) && parsed > 0
+            ? Math.min(Math.max(parsed, 0.5), 30)
+            : 2;
         this.logger.warn(`Shopify rate limited. Retrying in ${retryAfter}s`);
         await new Promise((r) => setTimeout(r, retryAfter * 1000));
         continue;

@@ -44,41 +44,45 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
       }
     } else if (exception instanceof Error) {
-      message = exception.message;
-      error = exception.name || 'Error';
+      const rawMessage = exception.message;
+      // Prisma error code can live on `exception.code` for PrismaClientKnownRequestError.
+      const prismaCode = (exception as { code?: string }).code;
 
       // Prisma-specific: foreign key constraint
-      if (message.includes('Foreign key constraint') || message.includes('P2003')) {
+      if (prismaCode === 'P2003' || rawMessage.includes('Foreign key constraint')) {
         status = HttpStatus.CONFLICT;
         message = 'Cannot delete: this item is referenced by other records. Remove dependent items first.';
         error = 'Conflict';
-      }
-
-      // Prisma: record not found
-      if (message.includes('Record to update not found') || message.includes('P2025')) {
+      } else if (prismaCode === 'P2025' || rawMessage.includes('Record to update not found')) {
+        // Prisma: record not found
         status = HttpStatus.NOT_FOUND;
         message = 'Record not found';
         error = 'Not Found';
-      }
-
-      // Prisma: unique constraint
-      if (message.includes('Unique constraint') || message.includes('P2002')) {
+      } else if (prismaCode === 'P2002' || rawMessage.includes('Unique constraint')) {
+        // Prisma: unique constraint
         status = HttpStatus.CONFLICT;
         message = 'A record with this value already exists';
         error = 'Conflict';
+      } else {
+        // Unknown internal error — do NOT leak the raw message to the
+        // client. Return a generic 500 and log the real details for ops.
+        status = HttpStatus.INTERNAL_SERVER_ERROR;
+        message = 'Internal server error';
+        error = 'Internal Server Error';
       }
     }
 
-    // Log server errors (5xx)
+    // Log server errors (5xx) with the real details; log 4xx at warn level.
+    const logLine = `${request.method} ${request.url} → ${status}: ${
+      exception instanceof Error ? exception.message : String(exception)
+    }`;
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.url} → ${status}: ${message}`,
+        logLine,
         exception instanceof Error ? exception.stack : undefined,
       );
     } else {
-      this.logger.warn(
-        `${request.method} ${request.url} → ${status}: ${message}`,
-      );
+      this.logger.warn(logLine);
     }
 
     response.status(status).json({

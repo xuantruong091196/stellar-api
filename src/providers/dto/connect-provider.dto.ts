@@ -2,12 +2,16 @@ import { IsString, IsOptional, IsNumber } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ConnectProviderDto {
-  @ApiProperty({
+  // storeId is resolved from the authenticated session; body-supplied values
+  // are ignored by the controller. Keeping the field optional here for
+  // backwards-compat with any client still sending it.
+  @ApiPropertyOptional({
     example: 'store-uuid-1234',
-    description: 'Store ID to connect',
+    description: 'Ignored — derived from auth context',
   })
+  @IsOptional()
   @IsString()
-  storeId: string;
+  storeId?: string;
 
   @ApiProperty({
     example: 'provider-uuid-5678',

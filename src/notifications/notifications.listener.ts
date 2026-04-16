@@ -30,7 +30,6 @@ export class NotificationsListener {
     shopifyOrderNumber: string;
     customerName: string;
     totalUsdc: number;
-    providerIds?: string[];
   }) {
     if (payload.storeId) {
       await this.notify(payload.storeId, 'store', payload, {
@@ -42,17 +41,8 @@ export class NotificationsListener {
         link: `/orders/${payload.orderId}`,
       });
     }
-
-    // Notify all assigned providers
-    for (const providerId of payload.providerIds || []) {
-      await this.notify(providerId, 'provider', payload, {
-        type: 'order.created',
-        title: `New order assigned`,
-        message: `Order #${payload.shopifyOrderNumber} assigned to you`,
-        relatedType: 'order',
-        relatedId: payload.orderId,
-      });
-    }
+    // Providers are notified separately via provider_order.created — one event per
+    // ProviderOrder so each provider gets its own row with the correct providerId scope.
   }
 
   @OnEvent('order.cancelled')
@@ -92,6 +82,27 @@ export class NotificationsListener {
   }
 
   // ─── Escrow ───────────────────────────────────────
+
+  @OnEvent('escrow.action_required')
+  async handleEscrowActionRequired(payload: BaseEventPayload & {
+    escrowId: string;
+    orderId: string;
+    providerOrderId: string;
+    amountUsdc: number;
+    providerName: string;
+    message: string;
+  }) {
+    if (payload.storeId) {
+      await this.notify(payload.storeId, 'store', payload, {
+        type: 'escrow.action_required',
+        title: `Escrow signature required`,
+        message: `${payload.providerName} is ready. Lock ${payload.amountUsdc.toFixed(2)} USDC to start production.`,
+        relatedType: 'escrow',
+        relatedId: payload.escrowId,
+        link: `/escrow`,
+      });
+    }
+  }
 
   @OnEvent('escrow.locking')
   async handleEscrowLocking(payload: BaseEventPayload & {
@@ -225,6 +236,24 @@ export class NotificationsListener {
   }
 
   // ─── Provider Orders ──────────────────────────────
+
+  @OnEvent('provider_order.created')
+  async handleProviderOrderCreated(payload: BaseEventPayload & {
+    orderId: string;
+    shopifyOrderNumber: string;
+    baseCostTotal: number;
+  }) {
+    if (payload.providerId) {
+      await this.notify(payload.providerId, 'provider', payload, {
+        type: 'provider_order.created',
+        title: `New order assigned`,
+        message: `Order #${payload.shopifyOrderNumber || payload.orderId} has been assigned to you`,
+        relatedType: 'order',
+        relatedId: payload.orderId,
+        link: `/provider/orders`,
+      });
+    }
+  }
 
   @OnEvent('provider_order.shipped')
   async handleProviderOrderShipped(payload: BaseEventPayload & {

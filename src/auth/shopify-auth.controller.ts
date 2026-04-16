@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import { Response } from 'express';
 import { ShopifyAuthService } from './shopify-auth.service';
 import { Public } from './decorators/public.decorator';
@@ -16,27 +17,35 @@ import { Public } from './decorators/public.decorator';
 export class ShopifyAuthController {
   private readonly logger = new Logger(ShopifyAuthController.name);
 
-  constructor(private readonly shopifyAuthService: ShopifyAuthService) {}
+  constructor(
+    private readonly shopifyAuthService: ShopifyAuthService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Get('install')
   @Public()
   @ApiOperation({ summary: 'Redirect to Shopify OAuth consent screen' })
   install(
     @Query('shop') shop: string,
+    @Query('wallet') wallet: string | undefined,
     @Res() res: Response,
   ) {
     if (!shop) {
       throw new BadRequestException('Missing required query parameter: shop');
     }
 
-    // Sanitize shop domain
     const sanitizedShop = this.sanitizeShop(shop);
     if (!sanitizedShop) {
       throw new BadRequestException('Invalid shop domain');
     }
 
-    const installUrl = this.shopifyAuthService.buildInstallUrl(sanitizedShop);
-    this.logger.log(`Redirecting ${sanitizedShop} to Shopify OAuth`);
+    // wallet param is the Stellar address of the initiating merchant — embedded
+    // into the signed OAuth state so we can link wallet ↔ Shopify on callback.
+    const sanitizedWallet =
+      wallet && /^G[A-Z2-7]{55}$/.test(wallet) ? wallet : null;
+
+    const installUrl = this.shopifyAuthService.buildInstallUrl(sanitizedShop, sanitizedWallet);
+    this.logger.log(`Redirecting ${sanitizedShop} to Shopify OAuth${sanitizedWallet ? ' (wallet link)' : ''}`);
     return res.redirect(installUrl);
   }
 
@@ -71,10 +80,11 @@ export class ShopifyAuthController {
 
       this.logger.log(`OAuth callback successful for ${sanitizedShop}`);
 
-      // Redirect to the embedded app URL
-      return res.redirect(
-        `https://${sanitizedShop}/admin/apps/${process.env.SHOPIFY_API_KEY}`,
-      );
+      // Redirect back to the Stelo app settings with a success indicator.
+      // The merchant initiated this from the wallet-authenticated settings page,
+      // so we send them back there (not into the Shopify admin embedded flow).
+      const appUrl = this.config.get<string>('app.publicUrl') || 'http://localhost:3000';
+      return res.redirect(`${appUrl}/settings?shopify=linked&shop=${encodeURIComponent(sanitizedShop)}`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown error';

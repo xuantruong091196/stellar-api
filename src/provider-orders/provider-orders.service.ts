@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
+import { EscrowService } from '../escrow/escrow.service';
 
 const STATUS_FLOW = [
   'pending',
@@ -27,6 +28,7 @@ export class ProviderOrdersService {
     private readonly prisma: PrismaService,
     private readonly shopifyGraphql: ShopifyGraphqlService,
     private readonly shopifyAuth: ShopifyAuthService,
+    private readonly escrowService: EscrowService,
   ) {}
 
   /**
@@ -160,6 +162,17 @@ export class ProviderOrdersService {
       `ProviderOrder ${providerOrderId} status updated: ${providerOrder.status} → ${newStatus}`,
     );
 
+    // Auto-release escrow when provider confirms delivery.
+    // Fire-and-forget — delivery status is committed regardless of release outcome.
+    // Failed releases revert to LOCKED and are retried via cron or manual action.
+    if (newStatus === 'delivered') {
+      this.escrowService.releaseEscrowForProviderOrder(providerOrderId).catch((err: Error) => {
+        this.logger.error(
+          `Auto-release failed for providerOrder ${providerOrderId}: ${err.message}`,
+        );
+      });
+    }
+
     return updated;
   }
 
@@ -200,17 +213,35 @@ export class ProviderOrdersService {
       );
     }
 
-    // Update tracking on the ProviderOrder
-    const updated = await this.prisma.providerOrder.update({
-      where: { id: providerOrderId },
-      data: {
-        trackingNumber,
-        trackingUrl: trackingUrl || null,
-        trackingCompany: company || null,
-        status: 'shipped',
-        shippedAt: providerOrder.shippedAt ?? new Date(),
-      },
-    });
+    // Update tracking + outbox atomically
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.providerOrder.update({
+        where: { id: providerOrderId },
+        data: {
+          trackingNumber,
+          trackingUrl: trackingUrl || null,
+          trackingCompany: company || null,
+          status: 'shipped',
+          shippedAt: providerOrder.shippedAt ?? new Date(),
+        },
+      }),
+      this.prisma.eventOutbox.create({
+        data: {
+          eventType: 'provider_order.shipped',
+          storeId: providerOrder.order.storeId,
+          providerId: providerOrder.providerId,
+          payload: {
+            providerOrderId,
+            orderId: providerOrder.order.id,
+            trackingNumber,
+            trackingUrl: trackingUrl || null,
+            company: company || null,
+            storeId: providerOrder.order.storeId,
+            providerId: providerOrder.providerId,
+          } as never,
+        },
+      }),
+    ]);
 
     // Trigger Shopify fulfillment if the order has a Shopify GID
     const order = providerOrder.order;
@@ -275,31 +306,13 @@ export class ProviderOrdersService {
       );
     }
 
-    // Emit event
-    await this.prisma.eventOutbox.create({
-      data: {
-        eventType: 'provider_order.shipped',
-        storeId: order.storeId,
-        providerId: providerOrder.providerId,
-        payload: {
-          providerOrderId,
-          orderId: order.id,
-          trackingNumber,
-          trackingUrl: trackingUrl || null,
-          company: company || null,
-          storeId: order.storeId,
-          providerId: providerOrder.providerId,
-        } as never,
-      },
-    });
-
     return updated;
   }
 
   /**
    * Get design file URLs for a provider order.
    */
-  async getDesignFiles(providerOrderId: string) {
+  async getDesignFiles(providerOrderId: string, callerProviderId: string) {
     const providerOrder = await this.prisma.providerOrder.findUnique({
       where: { id: providerOrderId },
     });
@@ -308,6 +321,14 @@ export class ProviderOrdersService {
       throw new NotFoundException(
         `ProviderOrder ${providerOrderId} not found`,
       );
+    }
+
+    // Ownership check: only the assigned provider may download design files
+    if (providerOrder.providerId !== callerProviderId) {
+      this.logger.warn(
+        `Unauthorized getDesignFiles: caller=${callerProviderId} order.provider=${providerOrder.providerId}`,
+      );
+      throw new ForbiddenException();
     }
 
     return {

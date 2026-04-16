@@ -22,7 +22,9 @@ export class NotificationsCleanupService {
       readNotificationsDeleted: 0,
       excessNotificationsDeleted: 0,
       processedOutboxDeleted: 0,
+      failedOutboxDeleted: 0,
       successfulWebhooksDeleted: 0,
+      webhookLogsDeleted: 0,
       webhookSecretsCleared: 0,
     };
 
@@ -59,7 +61,7 @@ export class NotificationsCleanupService {
       this.logger.error(`Excess notifications cleanup failed: ${(err as Error).message}`);
     }
 
-    // 3. Delete processed EventOutbox older than 7 days
+    // 3a. Delete processed EventOutbox older than 7 days
     try {
       const cutoff = new Date(Date.now() - 7 * 86400 * 1000);
       const result = await this.prisma.eventOutbox.deleteMany({
@@ -70,7 +72,23 @@ export class NotificationsCleanupService {
       });
       stats.processedOutboxDeleted = result.count;
     } catch (err) {
-      this.logger.error(`Outbox cleanup failed: ${(err as Error).message}`);
+      this.logger.error(`Processed outbox cleanup failed: ${(err as Error).message}`);
+    }
+
+    // 3b. Delete failed EventOutbox older than 30 days (dead-letter cleanup).
+    // Failed events have already exhausted retries; keep them around long
+    // enough for post-mortem investigation, then drop them.
+    try {
+      const cutoff = new Date(Date.now() - 30 * 86400 * 1000);
+      const result = await this.prisma.eventOutbox.deleteMany({
+        where: {
+          status: 'failed',
+          createdAt: { lt: cutoff },
+        },
+      });
+      stats.failedOutboxDeleted = result.count;
+    } catch (err) {
+      this.logger.error(`Failed outbox cleanup failed: ${(err as Error).message}`);
     }
 
     // 4. Delete successful WebhookDelivery older than 30 days
@@ -85,6 +103,21 @@ export class NotificationsCleanupService {
       stats.successfulWebhooksDeleted = result.count;
     } catch (err) {
       this.logger.error(`Webhook delivery cleanup failed: ${(err as Error).message}`);
+    }
+
+    // 4b. Delete Shopify WebhookLog rows older than 30 days. These only exist
+    // for webhook deduplication; once a webhook is 30 days old, Shopify has
+    // long since stopped retrying and the idempotency check is moot.
+    try {
+      const cutoff = new Date(Date.now() - 30 * 86400 * 1000);
+      const result = await this.prisma.webhookLog.deleteMany({
+        where: {
+          createdAt: { lt: cutoff },
+        },
+      });
+      stats.webhookLogsDeleted = result.count;
+    } catch (err) {
+      this.logger.error(`Webhook log cleanup failed: ${(err as Error).message}`);
     }
 
     // 5. Clear webhookSecretPrev after 24h grace period

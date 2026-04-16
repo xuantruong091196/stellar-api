@@ -114,6 +114,34 @@ export class GootenAdapter implements IProviderAdapter {
   }
 
   async submitOrder(input: SubmitOrderInput): Promise<SubmitOrderResult> {
+    // Validate every line item up front — Gooten rejects bad SKUs with a
+    // generic error, and a NaN/negative quantity poisons the API call.
+    const items = input.items.map((item) => {
+      if (
+        typeof item.externalVariantId !== 'string' ||
+        item.externalVariantId.length === 0
+      ) {
+        throw new Error(
+          `Invalid externalVariantId (Sku) for Gooten: "${item.externalVariantId}"`,
+        );
+      }
+      if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+        throw new Error(
+          `Invalid quantity for Gooten order item: ${item.quantity}`,
+        );
+      }
+      return {
+        Sku: item.externalVariantId,
+        Quantity: item.quantity,
+        Images: [
+          {
+            Url: item.designFileUrl,
+            Index: 0,
+          },
+        ],
+      };
+    });
+
     const payload = {
       ShipToAddress: {
         FirstName: input.shippingAddress.name.split(' ')[0],
@@ -127,16 +155,7 @@ export class GootenAdapter implements IProviderAdapter {
         Phone: input.shippingAddress.phone || '',
         Email: input.shippingAddress.email || '',
       },
-      Items: input.items.map((item) => ({
-        Sku: item.externalVariantId,
-        Quantity: item.quantity,
-        Images: [
-          {
-            Url: item.designFileUrl,
-            Index: 0,
-          },
-        ],
-      })),
+      Items: items,
       Payment: { CurrencyCode: 'USD' },
       Meta: { PartnerBillingKey: input.externalOrderRef },
     };
@@ -224,7 +243,13 @@ export class GootenAdapter implements IProviderAdapter {
   }
 
   verifyWebhook(_body: string | Buffer, _signature: string): boolean {
-    return true;
+    // SECURITY: Stub. Gooten doesn't currently sign webhooks; if/when they
+    // do, implement HMAC verification here against GOOTEN_WEBHOOK_SECRET.
+    // Until then, refuse rather than accept-by-default — anyone could
+    // otherwise forge a delivered notification and trigger escrow release.
+    throw new Error(
+      'GootenAdapter.verifyWebhook is not implemented — refusing to accept-by-default',
+    );
   }
 
   private mapStatus(status: string): string {

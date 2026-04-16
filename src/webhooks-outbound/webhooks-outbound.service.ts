@@ -12,9 +12,9 @@ interface WebhookEventPayload {
 }
 
 /**
- * Listens to all 16 events. For each recipient with webhook enabled,
- * creates a WebhookDelivery row in 'pending' state. The WebhookWorker
- * cron picks it up and POSTs.
+ * Listens to business events and, for each recipient with webhook enabled,
+ * creates a WebhookDelivery row in 'pending' state. The WebhookWorker cron
+ * picks it up and POSTs to the configured URL.
  */
 @Injectable()
 export class WebhooksOutboundService {
@@ -22,23 +22,18 @@ export class WebhooksOutboundService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Universal handler — all events come through here. */
-  @OnEvent('*.*' as never)
-  async handleAnyEvent(payload: WebhookEventPayload) {
-    // EventEmitter wildcard is wonky in NestJS — use individual @OnEvent declarations instead.
-    // This method exists as a fallback but won't fire reliably.
-  }
-
   // Register specific events
   @OnEvent('order.created') async oc(p: WebhookEventPayload) { await this.handle('order.created', p); }
   @OnEvent('order.cancelled') async oca(p: WebhookEventPayload) { await this.handle('order.cancelled', p); }
   @OnEvent('order.refunded') async or(p: WebhookEventPayload) { await this.handle('order.refunded', p); }
+  @OnEvent('escrow.action_required') async ear(p: WebhookEventPayload) { await this.handle('escrow.action_required', p); }
   @OnEvent('escrow.locking') async el1(p: WebhookEventPayload) { await this.handle('escrow.locking', p); }
   @OnEvent('escrow.locked') async el2(p: WebhookEventPayload) { await this.handle('escrow.locked', p); }
   @OnEvent('escrow.released') async er(p: WebhookEventPayload) { await this.handle('escrow.released', p); }
   @OnEvent('escrow.refunded') async erf(p: WebhookEventPayload) { await this.handle('escrow.refunded', p); }
   @OnEvent('escrow.lock_failed') async elf(p: WebhookEventPayload) { await this.handle('escrow.lock_failed', p); }
   @OnEvent('escrow.expired') async eex(p: WebhookEventPayload) { await this.handle('escrow.expired', p); }
+  @OnEvent('provider_order.created') async poc(p: WebhookEventPayload) { await this.handle('provider_order.created', p); }
   @OnEvent('provider_order.shipped') async pos(p: WebhookEventPayload) { await this.handle('provider_order.shipped', p); }
   @OnEvent('provider_order.delivered') async pod(p: WebhookEventPayload) { await this.handle('provider_order.delivered', p); }
   @OnEvent('dispute.opened') async dop(p: WebhookEventPayload) { await this.handle('dispute.opened', p); }

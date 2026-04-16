@@ -7,7 +7,6 @@ import type {
   OrderStatusResult,
   ShippingRate,
 } from '../provider-adapter.interface';
-import * as crypto from 'node:crypto';
 
 const BASE_URL = 'https://api.printify.com/v1';
 
@@ -120,17 +119,34 @@ export class PrintifyAdapter implements IProviderAdapter {
     if (!shops.length) throw new Error('No Printify shops found');
     const shopId = shops[0].id;
 
-    const payload = {
-      external_id: input.externalOrderRef,
-      line_items: input.items.map((item) => ({
-        variant_id: parseInt(item.externalVariantId, 10),
+    // Validate every line item up front — invalid variant IDs would be
+    // sent to Printify as NaN, which the API rejects with a generic error.
+    const lineItems = input.items.map((item) => {
+      const variantId = parseInt(item.externalVariantId, 10);
+      if (!Number.isInteger(variantId) || variantId <= 0) {
+        throw new Error(
+          `Invalid externalVariantId for Printify: "${item.externalVariantId}"`,
+        );
+      }
+      if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+        throw new Error(
+          `Invalid quantity for Printify order item: ${item.quantity}`,
+        );
+      }
+      return {
+        variant_id: variantId,
         quantity: item.quantity,
         print_areas: {
           [item.printArea || 'front']: {
             src: item.designFileUrl,
           },
         },
-      })),
+      };
+    });
+
+    const payload = {
+      external_id: input.externalOrderRef,
+      line_items: lineItems,
       shipping_method: 1, // Standard
       address_to: {
         first_name: input.shippingAddress.name.split(' ')[0],
@@ -200,9 +216,16 @@ export class PrintifyAdapter implements IProviderAdapter {
     ];
   }
 
-  verifyWebhook(body: string | Buffer, signature: string): boolean {
-    // Printify uses a shared secret for webhook verification
-    return true;
+  verifyWebhook(_body: string | Buffer, _signature: string): boolean {
+    // SECURITY: Do not call this stub. It currently has no implementation
+    // and used to return true unconditionally. Any caller wiring this up
+    // to a webhook controller MUST replace this with real HMAC verification
+    // against PRINTIFY_WEBHOOK_SECRET — otherwise anyone could forge a
+    // shipped/delivered notification and trigger escrow release on someone
+    // else's order.
+    throw new Error(
+      'PrintifyAdapter.verifyWebhook is not implemented — refusing to accept-by-default',
+    );
   }
 
   private mapStatus(status: string): string {

@@ -1,4 +1,13 @@
-import { IsOptional, IsString, IsBoolean, IsInt, Min, Max } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsBoolean,
+  IsInt,
+  Min,
+  Max,
+  Length,
+  MaxLength,
+} from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 
@@ -9,6 +18,7 @@ export class SearchProvidersDto {
   })
   @IsOptional()
   @IsString()
+  @Length(2, 2)
   country?: string;
 
   @ApiPropertyOptional({
@@ -17,6 +27,7 @@ export class SearchProvidersDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(50)
   specialty?: string;
 
   @ApiPropertyOptional({
@@ -33,11 +44,13 @@ export class SearchProvidersDto {
     description: 'Page number',
     default: 1,
     minimum: 1,
+    maximum: 10000,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(10_000)
   page?: number = 1;
 
   @ApiPropertyOptional({

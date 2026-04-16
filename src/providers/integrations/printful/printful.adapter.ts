@@ -8,7 +8,6 @@ import type {
   OrderStatusResult,
   ShippingRate,
 } from '../provider-adapter.interface';
-import * as crypto from 'node:crypto';
 
 const BASE_URL = 'https://api.printful.com';
 
@@ -45,19 +44,22 @@ export class PrintfulAdapter implements IProviderAdapter {
   }
 
   async syncCatalog(): Promise<CatalogProduct[]> {
-    // Printful catalog is public — fetch without auth to avoid store-scoped errors
+    // Printful catalog endpoint accepts the bearer token but the catalog
+    // itself is public. Try with auth first; on failure, retry without.
+    let products: any[] = [];
     const catalogRes = await fetch(`${BASE_URL}/catalog/products`, {
       headers: { Authorization: `Bearer ${this.apiToken}` },
     });
-    if (!catalogRes.ok) {
-      // Fallback: try without auth (public catalog)
-      const publicRes = await fetch(`${BASE_URL}/catalog/products`);
-      if (!publicRes.ok) throw new Error(`Printful catalog fetch failed: ${publicRes.status}`);
-      const pub = await publicRes.json();
-      var products = (pub as { result: any[] }).result || [];
-    } else {
+    if (catalogRes.ok) {
       const data = await catalogRes.json();
-      var products = (data as { result: any[] }).result || [];
+      products = (data as { result: any[] }).result || [];
+    } else {
+      const publicRes = await fetch(`${BASE_URL}/catalog/products`);
+      if (!publicRes.ok) {
+        throw new Error(`Printful catalog fetch failed: ${publicRes.status}`);
+      }
+      const pub = await publicRes.json();
+      products = (pub as { result: any[] }).result || [];
     }
 
     // Limit to popular POD categories
@@ -90,13 +92,20 @@ export class PrintfulAdapter implements IProviderAdapter {
           }[];
         }>(`/catalog/products/${prod.id}`);
 
+        // Use the cheapest variant's price as the base cost; fall back to 0
+        // if none parse cleanly (which would skip this product downstream).
+        const parsedPrices = (detail.variants || [])
+          .map((v) => parseFloat(v.price || ''))
+          .filter((n) => Number.isFinite(n) && n >= 0);
+        const baseCost = parsedPrices.length > 0 ? Math.min(...parsedPrices) : 0;
+
         catalog.push({
           externalProductId: String(detail.product.id),
           name: detail.product.title,
           brand: detail.product.brand,
           description: detail.product.description,
           productType: this.mapProductType(detail.product.type),
-          baseCost: parseFloat(detail.variants[0]?.price || '0'),
+          baseCost,
           blankImages: { default: detail.product.image },
           printAreas: [{ name: 'front', widthPx: 4200, heightPx: 4800, dpi: 300 }],
           productionDays: 3,
@@ -120,6 +129,33 @@ export class PrintfulAdapter implements IProviderAdapter {
   }
 
   async submitOrder(input: SubmitOrderInput): Promise<SubmitOrderResult> {
+    // Validate every line item up front so we don't half-submit a Printful
+    // order with a NaN variant_id (which Printful rejects with a confusing
+    // generic error). Also catches negative or fractional quantities.
+    const items = input.items.map((item) => {
+      const variantId = parseInt(item.externalVariantId, 10);
+      if (!Number.isInteger(variantId) || variantId <= 0) {
+        throw new Error(
+          `Invalid externalVariantId for Printful: "${item.externalVariantId}"`,
+        );
+      }
+      if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+        throw new Error(
+          `Invalid quantity for Printful order item: ${item.quantity}`,
+        );
+      }
+      return {
+        variant_id: variantId,
+        quantity: item.quantity,
+        files: [
+          {
+            type: item.printArea || 'default',
+            url: item.designFileUrl,
+          },
+        ],
+      };
+    });
+
     const payload = {
       external_id: input.externalOrderRef,
       shipping: 'STANDARD',
@@ -134,16 +170,7 @@ export class PrintfulAdapter implements IProviderAdapter {
         phone: input.shippingAddress.phone || '',
         email: input.shippingAddress.email || '',
       },
-      items: input.items.map((item) => ({
-        variant_id: parseInt(item.externalVariantId, 10),
-        quantity: item.quantity,
-        files: [
-          {
-            type: item.printArea || 'default',
-            url: item.designFileUrl,
-          },
-        ],
-      })),
+      items,
     };
 
     const order = await this.request<{
@@ -193,10 +220,15 @@ export class PrintfulAdapter implements IProviderAdapter {
         state_code: address.state || '',
         zip: address.zip || '',
       },
-      items: items.map((i) => ({
-        variant_id: parseInt(i.externalVariantId, 10),
-        quantity: i.quantity,
-      })),
+      items: items.map((i) => {
+        const variantId = parseInt(i.externalVariantId, 10);
+        if (!Number.isInteger(variantId) || variantId <= 0) {
+          throw new Error(
+            `Invalid externalVariantId for Printful shipping rates: "${i.externalVariantId}"`,
+          );
+        }
+        return { variant_id: variantId, quantity: i.quantity };
+      }),
     };
 
     const rates = await this.request<
@@ -206,18 +238,32 @@ export class PrintfulAdapter implements IProviderAdapter {
       body: JSON.stringify(payload),
     });
 
-    return rates.map((r) => ({
-      id: r.id,
-      name: r.name,
-      rate: parseFloat(r.rate),
-      currency: r.currency,
-      estimatedDays: { min: r.minDeliveryDays, max: r.maxDeliveryDays },
-    }));
+    // Filter out malformed rate values — a NaN/negative `rate` would
+    // either break checkout totals or display "$NaN" to the customer.
+    return rates
+      .map((r) => {
+        const parsed = parseFloat(r.rate);
+        if (!Number.isFinite(parsed) || parsed < 0) return null;
+        return {
+          id: r.id,
+          name: r.name,
+          rate: parsed,
+          currency: r.currency,
+          estimatedDays: { min: r.minDeliveryDays, max: r.maxDeliveryDays },
+        };
+      })
+      .filter((r): r is ShippingRate => r !== null);
   }
 
-  verifyWebhook(body: string | Buffer, signature: string): boolean {
-    // Printful doesn't use HMAC signatures, they use a webhook secret in the URL
-    return true;
+  verifyWebhook(_body: string | Buffer, _signature: string): boolean {
+    // SECURITY: Do not call this stub. Printful's webhook auth uses a
+    // shared secret embedded in the callback URL path; the real check
+    // belongs in the receiving controller (compare path-token to a server
+    // secret). Returning true here silently would let anyone forge a
+    // delivered notification and trigger escrow release.
+    throw new Error(
+      'PrintfulAdapter.verifyWebhook is not implemented — verify the URL path secret in the controller',
+    );
   }
 
   private mapStatus(printfulStatus: string): string {

@@ -186,6 +186,11 @@ export class ProviderAuthService {
 
   /**
    * Register a new provider with email/password.
+   *
+   * Relies on the @unique index on contactEmail to catch duplicate
+   * registrations — the up-front findUnique check is just for a nicer
+   * error when the common case is "already registered", while the P2002
+   * catch protects against the concurrent-register TOCTOU race.
    */
   async register(
     email: string,
@@ -194,7 +199,7 @@ export class ProviderAuthService {
     country: string,
     stellarAddress: string,
   ) {
-    const existing = await this.prisma.provider.findFirst({
+    const existing = await this.prisma.provider.findUnique({
       where: { contactEmail: email },
     });
 
@@ -206,16 +211,27 @@ export class ProviderAuthService {
 
     const passwordHash = this.hashPassword(password);
 
-    const provider = await this.prisma.provider.create({
-      data: {
-        name,
-        country,
-        contactEmail: email,
-        stellarAddress,
-        passwordHash,
-        specialties: [],
-      },
-    });
+    let provider;
+    try {
+      provider = await this.prisma.provider.create({
+        data: {
+          name,
+          country,
+          contactEmail: email,
+          stellarAddress,
+          passwordHash,
+          specialties: [],
+        },
+      });
+    } catch (err) {
+      const prismaErr = err as { code?: string };
+      if (prismaErr.code === 'P2002') {
+        throw new ConflictException(
+          `Provider with email ${email} already exists`,
+        );
+      }
+      throw err;
+    }
 
     this.logger.log(`Provider registered: ${provider.id} (${provider.name})`);
 
@@ -244,7 +260,7 @@ export class ProviderAuthService {
    * Login with email/password, return JWT.
    */
   async login(email: string, password: string) {
-    const provider = await this.prisma.provider.findFirst({
+    const provider = await this.prisma.provider.findUnique({
       where: { contactEmail: email },
     });
 

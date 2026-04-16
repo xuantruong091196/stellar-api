@@ -7,8 +7,10 @@ import {
   Param,
   Body,
   Query,
+  Req,
   HttpCode,
   HttpStatus,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -18,6 +20,7 @@ import {
 } from '@nestjs/swagger';
 import { ProvidersService } from './providers.service';
 import { Admin } from '../auth/decorators/admin.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import {
   RegisterProviderDto,
   SearchProvidersDto,
@@ -25,33 +28,25 @@ import {
   ConnectProviderDto,
   UpdateProviderDto,
 } from './dto';
+import { SetupIntegrationDto } from './dto/setup-integration.dto';
 
 @ApiTags('providers')
 @Controller('providers')
 export class ProvidersController {
   constructor(private readonly providersService: ProvidersService) {}
 
+  private requireStoreId(req: any): string {
+    const id = req.store?.id as string | undefined;
+    if (!id) {
+      throw new ForbiddenException('Store authentication required');
+    }
+    return id;
+  }
+
   @Post()
-  @ApiOperation({ summary: 'Register a new print provider' })
-  @ApiResponse({
-    status: 201,
-    description: 'Provider registered successfully',
-    schema: {
-      example: {
-        id: 'uuid-1234',
-        name: 'PrintCo Global',
-        country: 'US',
-        contactEmail: 'contact@printco.com',
-        stellarAddress: 'GDKJ...XLMN',
-        verified: false,
-        rating: 0,
-        totalOrders: 0,
-        specialties: ['dtg', 'screen-print'],
-        minOrderQty: 10,
-        avgLeadDays: 5,
-      },
-    },
-  })
+  @Admin()
+  @ApiOperation({ summary: 'Register a new print provider (admin)' })
+  @ApiResponse({ status: 201, description: 'Provider registered successfully' })
   @ApiResponse({ status: 409, description: 'Provider with this email already exists' })
   async register(@Body() dto: RegisterProviderDto) {
     return this.providersService.register(dto);
@@ -61,11 +56,7 @@ export class ProvidersController {
   @Admin()
   @ApiOperation({ summary: 'Verify a provider (admin)' })
   @ApiParam({ name: 'providerId', description: 'Provider UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Provider verified',
-    schema: { example: { verified: true } },
-  })
+  @ApiResponse({ status: 200, description: 'Provider verified' })
   @ApiResponse({ status: 404, description: 'Provider not found' })
   async verify(@Param('providerId') providerId: string) {
     await this.providersService.verify(providerId);
@@ -73,101 +64,47 @@ export class ProvidersController {
   }
 
   @Get('search')
+  @Public()
   @ApiOperation({ summary: 'Search providers' })
-  @ApiResponse({
-    status: 200,
-    description: 'Paginated list of providers',
-    schema: {
-      example: {
-        data: [
-          {
-            id: 'uuid-1234',
-            name: 'PrintCo Global',
-            country: 'US',
-            verified: true,
-            rating: 4.5,
-            specialties: ['dtg'],
-          },
-        ],
-        meta: { total: 1, page: 1, limit: 20, totalPages: 1 },
-      },
-    },
-  })
+  @ApiResponse({ status: 200, description: 'Paginated list of providers' })
   async search(@Query() dto: SearchProvidersDto) {
     return this.providersService.search(dto);
   }
 
   @Post(':providerId/rate')
-  @ApiOperation({ summary: 'Rate a provider' })
+  @ApiOperation({ summary: 'Rate a provider (store-authenticated)' })
   @ApiParam({ name: 'providerId', description: 'Provider UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Provider rated successfully',
-    schema: {
-      example: {
-        id: 'uuid-1234',
-        name: 'PrintCo Global',
-        rating: 4.25,
-        totalOrders: 4,
-      },
-    },
-  })
+  @ApiResponse({ status: 200, description: 'Provider rated successfully' })
   @ApiResponse({ status: 404, description: 'Provider not found' })
   @HttpCode(HttpStatus.OK)
   async rate(
     @Param('providerId') providerId: string,
     @Body() dto: RateProviderDto,
+    @Req() req: any,
   ) {
+    // Only stores that have done business with the provider can rate them.
+    // At minimum, require store authentication here; richer eligibility
+    // (must have a DELIVERED order with this provider) should live in the
+    // service layer.
+    this.requireStoreId(req);
     return this.providersService.rate(providerId, dto.rating);
   }
 
   @Get('store/:storeId')
-  @ApiOperation({ summary: "List a store's connected providers" })
-  @ApiParam({ name: 'storeId', description: 'Store UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'List of store-provider connections',
-    schema: {
-      example: [
-        {
-          id: 'link-uuid',
-          storeId: 'store-uuid',
-          providerId: 'provider-uuid',
-          status: 'active',
-          agreedRate: 0.15,
-          provider: {
-            id: 'provider-uuid',
-            name: 'PrintCo Global',
-            country: 'US',
-          },
-        },
-      ],
-    },
-  })
-  async getStoreProviders(@Param('storeId') storeId: string) {
-    return this.providersService.getStoreProviders(storeId);
+  @ApiOperation({ summary: "List a store's connected providers (param ignored — uses auth)" })
+  @ApiParam({ name: 'storeId', description: 'Ignored — derived from auth context' })
+  async getStoreProviders(@Req() req: any) {
+    return this.providersService.getStoreProviders(this.requireStoreId(req));
   }
 
   @Post('connect')
   @ApiOperation({ summary: 'Connect a store to a provider' })
-  @ApiResponse({
-    status: 201,
-    description: 'Store-provider connection created',
-    schema: {
-      example: {
-        id: 'link-uuid',
-        storeId: 'store-uuid',
-        providerId: 'provider-uuid',
-        status: 'active',
-        agreedRate: 0.15,
-      },
-    },
-  })
-  @ApiResponse({ status: 404, description: 'Provider not found' })
-  @ApiResponse({ status: 409, description: 'Connection already exists' })
-  async connectStore(@Body() dto: ConnectProviderDto) {
+  @ApiResponse({ status: 201, description: 'Store-provider connection created' })
+  async connectStore(@Body() dto: ConnectProviderDto, @Req() req: any) {
+    // Ignore any body-supplied storeId — always use the authenticated store.
+    const callerStoreId = this.requireStoreId(req);
     return this.providersService.connectStore(
-      dto.storeId,
+      callerStoreId,
       dto.providerId,
       dto.agreedRate,
     );
@@ -175,56 +112,34 @@ export class ProvidersController {
 
   @Delete('disconnect')
   @ApiOperation({ summary: 'Disconnect a store from a provider' })
-  @ApiResponse({ status: 200, description: 'Disconnected successfully' })
-  @ApiResponse({ status: 404, description: 'Connection not found' })
   @HttpCode(HttpStatus.OK)
-  async disconnectStore(@Body() dto: ConnectProviderDto) {
-    await this.providersService.disconnectStore(dto.storeId, dto.providerId);
+  async disconnectStore(@Body() dto: ConnectProviderDto, @Req() req: any) {
+    const callerStoreId = this.requireStoreId(req);
+    await this.providersService.disconnectStore(callerStoreId, dto.providerId);
     return { disconnected: true };
   }
 
   @Patch(':providerId')
-  @ApiOperation({ summary: 'Update provider details' })
+  @ApiOperation({ summary: 'Update provider details (self or admin)' })
   @ApiParam({ name: 'providerId', description: 'Provider UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Provider updated successfully',
-    schema: {
-      example: {
-        id: 'uuid-1234',
-        name: 'PrintCo Global Updated',
-        country: 'US',
-        contactEmail: 'new@printco.com',
-      },
-    },
-  })
-  @ApiResponse({ status: 404, description: 'Provider not found' })
   async updateProvider(
     @Param('providerId') providerId: string,
     @Body() dto: UpdateProviderDto,
+    @Req() req: any,
   ) {
+    // The caller must be either the provider being updated, or a platform admin.
+    const callerProviderId = req.provider?.id as string | undefined;
+    const isAdmin = req.store?.plan === 'admin';
+    if (callerProviderId !== providerId && !isAdmin) {
+      throw new ForbiddenException();
+    }
     return this.providersService.updateProvider(providerId, dto);
   }
 
   @Get(':providerId')
-  @ApiOperation({ summary: 'Get provider details' })
+  @Public()
+  @ApiOperation({ summary: 'Get provider details (public profile)' })
   @ApiParam({ name: 'providerId', description: 'Provider UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Provider details',
-    schema: {
-      example: {
-        id: 'uuid-1234',
-        name: 'PrintCo Global',
-        country: 'US',
-        contactEmail: 'contact@printco.com',
-        verified: true,
-        rating: 4.5,
-        totalOrders: 42,
-      },
-    },
-  })
-  @ApiResponse({ status: 404, description: 'Provider not found' })
   async getProvider(@Param('providerId') providerId: string) {
     return this.providersService.getProvider(providerId);
   }
@@ -235,7 +150,7 @@ export class ProvidersController {
   @ApiParam({ name: 'providerId' })
   async setupIntegration(
     @Param('providerId') providerId: string,
-    @Body() dto: { integrationType: string; apiToken: string; apiSecret?: string },
+    @Body() dto: SetupIntegrationDto,
   ) {
     return this.providersService.setupIntegration(
       providerId,

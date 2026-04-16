@@ -58,6 +58,11 @@ export class EmailService implements OnModuleInit {
 
   /**
    * Send a notification email with rate limiting and priority handling.
+   *
+   * Rate limiting: we reserve a slot up front via atomic INCR so concurrent
+   * senders can't all slip past a stale `todayCount` read. If we overshoot
+   * the limit or the actual send fails, we DECR to return the reservation
+   * so the counter stays honest.
    */
   async send(input: {
     to: string;
@@ -67,26 +72,54 @@ export class EmailService implements OnModuleInit {
     payload: Record<string, unknown>;
   }): Promise<{ sent: boolean; reason?: string }> {
     const priority = EVENT_PRIORITY_MAP[input.type];
-
-    // Rate limit check
     const dailyKey = `email:count:${new Date().toISOString().slice(0, 10)}`;
-    const todayCount = this.redis ? parseInt((await this.redis.get(dailyKey)) || '0', 10) : 0;
 
-    if (todayCount >= this.hardLimit) {
-      this.logger.error(`Email hard limit reached (${this.hardLimit}), dropping email to ${input.to}`);
+    // Step 1: atomically reserve a slot. If Redis is unavailable we skip the
+    // rate-limit check entirely (best-effort mode).
+    let reservedCount: number | null = null;
+    if (this.redis) {
+      reservedCount = await this.redis.incr(dailyKey);
+      // expire only sets on first INCR (when the key was just created)
+      if (reservedCount === 1) {
+        await this.redis.expire(dailyKey, 86400 * 2);
+      }
+    }
+
+    const releaseReservation = async () => {
+      if (this.redis && reservedCount !== null) {
+        await this.redis.decr(dailyKey).catch(() => undefined);
+      }
+    };
+
+    // Step 2: check limits against the reserved count.
+    if (reservedCount !== null && reservedCount > this.hardLimit) {
+      await releaseReservation();
+      this.logger.error(
+        `Email hard limit reached (${this.hardLimit}), dropping email to ${input.to}`,
+      );
       return { sent: false, reason: 'hard_limit_reached' };
     }
 
-    if (todayCount >= this.dailyLimit && priority !== 'critical') {
-      this.logger.warn(`Email soft limit reached (${this.dailyLimit}), skipping ${priority} email`);
+    if (
+      reservedCount !== null &&
+      reservedCount > this.dailyLimit &&
+      priority !== 'critical'
+    ) {
+      await releaseReservation();
+      this.logger.warn(
+        `Email soft limit reached (${this.dailyLimit}), skipping ${priority} email`,
+      );
       return { sent: false, reason: 'soft_limit_reached' };
     }
 
     if (!this.resend) {
+      await releaseReservation();
       this.logger.log(`[DRY RUN] Email to ${input.to}: ${input.title}`);
       return { sent: false, reason: 'resend_not_configured' };
     }
 
+    // Step 3: send. The reservation is already counted — only release it
+    // on failure so the counter matches reality.
     try {
       const rendered = await this.templates.render(input.type, input.locale, input.payload);
 
@@ -98,15 +131,10 @@ export class EmailService implements OnModuleInit {
         html: rendered.html,
       });
 
-      // Increment counter
-      if (this.redis) {
-        await this.redis.incr(dailyKey);
-        await this.redis.expire(dailyKey, 86400 * 2); // expire after 2 days
-      }
-
       this.logger.log(`Email sent to ${input.to}: ${input.type}`);
       return { sent: true };
     } catch (err) {
+      await releaseReservation();
       this.logger.error(`Failed to send email to ${input.to}: ${(err as Error).message}`);
       throw err;
     }

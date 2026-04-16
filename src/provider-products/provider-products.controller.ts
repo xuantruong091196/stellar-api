@@ -17,6 +17,7 @@ import {
   ApiParam,
 } from '@nestjs/swagger';
 import { ProviderProductsService } from './provider-products.service';
+import { Admin } from '../auth/decorators/admin.decorator';
 import {
   CreateProviderProductDto,
   UpdateProviderProductDto,
@@ -31,7 +32,8 @@ export class ProviderProductsController {
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create a provider product with variants' })
+  @Admin()
+  @ApiOperation({ summary: 'Create a provider product with variants (admin)' })
   @ApiResponse({ status: 201, description: 'Product created successfully' })
   @ApiResponse({ status: 400, description: 'Validation error' })
   async create(@Body() dto: CreateProviderProductDto) {
@@ -65,7 +67,8 @@ export class ProviderProductsController {
 
   // Static routes MUST come before parameterized routes
   @Patch('variants/:variantId/stock')
-  @ApiOperation({ summary: 'Toggle variant stock status' })
+  @Admin()
+  @ApiOperation({ summary: 'Toggle variant stock status (admin)' })
   @ApiParam({ name: 'variantId', description: 'Variant UUID' })
   @ApiResponse({ status: 200, description: 'Stock status updated' })
   @ApiResponse({ status: 404, description: 'Variant not found' })
@@ -95,7 +98,8 @@ export class ProviderProductsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a provider product' })
+  @Admin()
+  @ApiOperation({ summary: 'Update a provider product (admin)' })
   @ApiParam({ name: 'id', description: 'Provider product UUID' })
   @ApiResponse({ status: 200, description: 'Product updated successfully' })
   @ApiResponse({ status: 404, description: 'Product not found' })
@@ -107,7 +111,8 @@ export class ProviderProductsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Soft-delete a provider product' })
+  @Admin()
+  @ApiOperation({ summary: 'Soft-delete a provider product (admin)' })
   @ApiParam({ name: 'id', description: 'Provider product UUID' })
   @ApiResponse({ status: 200, description: 'Product deleted' })
   @ApiResponse({ status: 404, description: 'Product not found' })

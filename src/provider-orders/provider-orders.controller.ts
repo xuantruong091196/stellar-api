@@ -10,6 +10,7 @@ import {
   Sse,
   MessageEvent,
   Headers,
+  ForbiddenException,
 } from '@nestjs/common';
 import { Observable, interval, switchMap, map, filter } from 'rxjs';
 import {
@@ -22,6 +23,7 @@ import { ProviderOrdersService } from './provider-orders.service';
 import { UpdateProviderOrderStatusDto } from './dto/update-provider-order-status.dto';
 import { SubmitTrackingDto } from './dto/submit-tracking.dto';
 import { QueryProviderOrdersDto } from './dto/query-provider-orders.dto';
+import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('provider-orders')
 @Controller('provider-orders')
@@ -30,7 +32,26 @@ export class ProviderOrdersController {
     private readonly providerOrdersService: ProviderOrdersService,
   ) {}
 
+  private requireProviderId(req: any): string {
+    const id = req.provider?.id as string | undefined;
+    if (!id) {
+      throw new ForbiddenException('Provider authentication required');
+    }
+    return id;
+  }
+
+  /**
+   * SSE stream of provider order events.
+   *
+   * NOTE: EventSource can't send auth headers, so this endpoint is marked
+   * @Public() and accepts an unauthenticated connection. The data it
+   * returns is limited to order status + ids (no PII, no design URLs),
+   * but a determined attacker can still enumerate a provider's order
+   * volume. Migrate to the session-token pattern used by /notifications/stream
+   * when time permits.
+   */
   @Sse(':providerId/stream')
+  @Public()
   @ApiOperation({ summary: 'SSE stream of real-time order notifications for a provider' })
   @ApiParam({ name: 'providerId', description: 'The provider ID' })
   orderStream(
@@ -50,7 +71,6 @@ export class ProviderOrdersController {
       }),
       filter((orders) => orders.length > 0),
       switchMap((orders) => {
-        // Update sinceMs to the latest updatedAt so we don't re-send
         const latestMs = Math.max(
           ...orders.map((o) => new Date(o.updatedAt).getTime()),
         );
@@ -82,7 +102,10 @@ export class ProviderOrdersController {
   async getProviderOrders(
     @Param('providerId') providerId: string,
     @Query() query: QueryProviderOrdersDto,
+    @Req() req: any,
   ) {
+    const callerProviderId = this.requireProviderId(req);
+    if (callerProviderId !== providerId) throw new ForbiddenException();
     return this.providerOrdersService.getProviderOrders(providerId, query);
   }
 
@@ -91,8 +114,11 @@ export class ProviderOrdersController {
   @ApiParam({ name: 'id', description: 'The provider order ID' })
   @ApiResponse({ status: 200, description: 'Provider order details' })
   @ApiResponse({ status: 404, description: 'Provider order not found' })
-  async getProviderOrder(@Param('id') id: string) {
-    return this.providerOrdersService.getProviderOrder(id);
+  async getProviderOrder(@Param('id') id: string, @Req() req: any) {
+    const callerProviderId = this.requireProviderId(req);
+    const order = await this.providerOrdersService.getProviderOrder(id);
+    if (order.providerId !== callerProviderId) throw new ForbiddenException();
+    return order;
   }
 
   @Patch(':id/status')
@@ -106,8 +132,7 @@ export class ProviderOrdersController {
     @Body() dto: UpdateProviderOrderStatusDto,
     @Req() req: any,
   ) {
-    const callerProviderId = req.provider?.id;
-    return this.providerOrdersService.updateStatus(id, dto.status, callerProviderId);
+    return this.providerOrdersService.updateStatus(id, dto.status, this.requireProviderId(req));
   }
 
   @Post(':id/tracking')
@@ -123,11 +148,10 @@ export class ProviderOrdersController {
     @Body() dto: SubmitTrackingDto,
     @Req() req: any,
   ) {
-    const callerProviderId = req.provider?.id;
     return this.providerOrdersService.submitTracking(
       id,
       dto.trackingNumber,
-      callerProviderId,
+      this.requireProviderId(req),
       dto.trackingUrl,
       dto.company,
     );
@@ -137,8 +161,9 @@ export class ProviderOrdersController {
   @ApiOperation({ summary: 'Get design file URLs for a provider order' })
   @ApiParam({ name: 'id', description: 'The provider order ID' })
   @ApiResponse({ status: 200, description: 'Design file download URLs' })
+  @ApiResponse({ status: 403, description: 'Not your order' })
   @ApiResponse({ status: 404, description: 'Provider order not found' })
-  async getDesignFiles(@Param('id') id: string) {
-    return this.providerOrdersService.getDesignFiles(id);
+  async getDesignFiles(@Param('id') id: string, @Req() req: any) {
+    return this.providerOrdersService.getDesignFiles(id, this.requireProviderId(req));
   }
 }

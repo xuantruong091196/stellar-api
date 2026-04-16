@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -49,6 +50,12 @@ export class PricingService {
     variantSize?: string,
     variantColor?: string,
   ) {
+    if (!Number.isFinite(retailPrice) || retailPrice < 0 || retailPrice > 1_000_000) {
+      throw new BadRequestException(
+        `retailPrice must be a non-negative number under 1,000,000 (got ${retailPrice})`,
+      );
+    }
+
     const product = await this.prisma.providerProduct.findUnique({
       where: { id: providerProductId },
       include: { variants: true },
@@ -96,6 +103,31 @@ export class PricingService {
    * Calculate full order pricing breakdown.
    */
   async calculateOrderPricing(orderItems: OrderItemInput[]) {
+    if (!Array.isArray(orderItems) || orderItems.length === 0) {
+      throw new BadRequestException('orderItems must be a non-empty array');
+    }
+    if (orderItems.length > 100) {
+      throw new BadRequestException(
+        `orderItems too large (${orderItems.length}), max 100`,
+      );
+    }
+    for (const item of orderItems) {
+      if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 10_000) {
+        throw new BadRequestException(
+          `quantity must be an integer in [1, 10000] (got ${item.quantity})`,
+        );
+      }
+      if (
+        !Number.isFinite(item.retailPrice) ||
+        item.retailPrice < 0 ||
+        item.retailPrice > 1_000_000
+      ) {
+        throw new BadRequestException(
+          `retailPrice must be a non-negative number under 1,000,000 (got ${item.retailPrice})`,
+        );
+      }
+    }
+
     const items: ItemPricingBreakdown[] = [];
     let totalBaseCost = 0;
     let totalPlatformFee = 0;
@@ -184,6 +216,16 @@ export class PricingService {
     providerProductId: string,
     targetMarginPercent: number,
   ) {
+    if (
+      !Number.isFinite(targetMarginPercent) ||
+      targetMarginPercent < 0 ||
+      targetMarginPercent >= 100
+    ) {
+      throw new BadRequestException(
+        `targetMarginPercent must be a number in [0, 100) (got ${targetMarginPercent})`,
+      );
+    }
+
     const product = await this.prisma.providerProduct.findUnique({
       where: { id: providerProductId },
     });

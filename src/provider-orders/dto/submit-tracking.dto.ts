@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsUrl,
+  MaxLength,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SubmitTrackingDto {
@@ -8,14 +14,19 @@ export class SubmitTrackingDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   trackingNumber: string;
 
   @ApiPropertyOptional({
-    description: 'URL to track the shipment',
+    description: 'URL to track the shipment — must be http(s)',
     example: 'https://tracking.example.com/1Z999AA10123456784',
   })
   @IsOptional()
-  @IsString()
+  @IsUrl(
+    { require_protocol: true, protocols: ['http', 'https'] },
+    { message: 'trackingUrl must be an http(s) URL' },
+  )
+  @MaxLength(2048)
   trackingUrl?: string;
 
   @ApiPropertyOptional({
@@ -24,5 +35,6 @@ export class SubmitTrackingDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   company?: string;
 }

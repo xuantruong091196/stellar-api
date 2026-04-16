@@ -5,8 +5,10 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProviderAdapterFactory } from './integrations/provider-adapter.factory';
+import { encrypt, decrypt } from '../common/crypto.util';
 
 @Injectable()
 export class ProvidersService {
@@ -14,11 +16,54 @@ export class ProvidersService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
     private readonly adapterFactory: ProviderAdapterFactory,
   ) {}
 
   /**
+   * Get the AES-256-GCM encryption key from config. Throws if missing
+   * — bootstrap already verifies this at startup, so a missing key here
+   * is a programmer error worth crashing on.
+   */
+  private getEncryptionKey(): string {
+    const key = this.config.get<string>('encryption.key');
+    if (!key) {
+      throw new Error('ENCRYPTION_KEY is not configured');
+    }
+    return key;
+  }
+
+  /**
+   * Decrypt a stored provider token. Tolerates legacy plaintext rows
+   * written before encryption was wired up — if the value doesn't look
+   * like our `iv:authTag:ciphertext` format, return it as-is and log a
+   * warning so ops can plan a re-encryption migration.
+   */
+  decryptProviderToken(stored: string | null | undefined): string | undefined {
+    if (!stored) return undefined;
+    if (!/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/i.test(stored)) {
+      this.logger.warn(
+        'Provider apiToken/apiSecret stored in plaintext (legacy row); please re-run setupIntegration to encrypt',
+      );
+      return stored;
+    }
+    try {
+      return decrypt(stored, this.getEncryptionKey());
+    } catch (err) {
+      this.logger.error(
+        `Failed to decrypt provider token: ${(err as Error).message}`,
+      );
+      throw new BadRequestException('Provider token is corrupt — re-setup required');
+    }
+  }
+
+  /**
    * Register a new print provider.
+   *
+   * Uses findUnique + a P2002 catch around create. The @unique index on
+   * contactEmail closes the TOCTOU race between the pre-check and the
+   * create — two concurrent registrations for the same email will
+   * deterministically yield one success + one ConflictException.
    */
   async register(data: {
     name: string;
@@ -29,8 +74,7 @@ export class ProvidersService {
     minOrderQty?: number;
     avgLeadDays?: number;
   }) {
-    // Check for duplicate email
-    const existing = await this.prisma.provider.findFirst({
+    const existing = await this.prisma.provider.findUnique({
       where: { contactEmail: data.contactEmail },
     });
 
@@ -40,20 +84,30 @@ export class ProvidersService {
       );
     }
 
-    const provider = await this.prisma.provider.create({
-      data: {
-        name: data.name,
-        country: data.country,
-        contactEmail: data.contactEmail,
-        stellarAddress: data.stellarAddress,
-        specialties: data.specialties || [],
-        minOrderQty: data.minOrderQty ?? 1,
-        avgLeadDays: data.avgLeadDays ?? 7,
-      },
-    });
+    try {
+      const provider = await this.prisma.provider.create({
+        data: {
+          name: data.name,
+          country: data.country,
+          contactEmail: data.contactEmail,
+          stellarAddress: data.stellarAddress,
+          specialties: data.specialties || [],
+          minOrderQty: data.minOrderQty ?? 1,
+          avgLeadDays: data.avgLeadDays ?? 7,
+        },
+      });
 
-    this.logger.log(`Provider registered: ${provider.id} (${provider.name})`);
-    return provider;
+      this.logger.log(`Provider registered: ${provider.id} (${provider.name})`);
+      return provider;
+    } catch (err) {
+      const prismaErr = err as { code?: string };
+      if (prismaErr.code === 'P2002') {
+        throw new ConflictException(
+          `Provider with email ${data.contactEmail} already exists`,
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -125,35 +179,54 @@ export class ProvidersService {
 
   /**
    * Rate a provider after order completion.
+   *
+   * Atomic update: the new average rating is computed inside a single
+   * UPDATE statement so two concurrent ratings can't clobber each other.
+   * Before this fix, a read-compute-write pattern could lose a rating's
+   * effect on the running average when two raters hit the endpoint at
+   * the same time.
    */
   async rate(providerId: string, rating: number) {
-    if (rating < 1 || rating > 5) {
-      throw new Error('Rating must be between 1 and 5');
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      throw new BadRequestException('Rating must be a number between 1 and 5');
     }
 
-    const provider = await this.prisma.provider.findUnique({
+    // Verify the provider exists before running the UPDATE (so we return
+    // a proper 404 instead of a silent no-op).
+    const exists = await this.prisma.provider.findUnique({
       where: { id: providerId },
+      select: { id: true },
     });
-
-    if (!provider) {
+    if (!exists) {
       throw new NotFoundException(`Provider ${providerId} not found`);
     }
 
-    // Calculate new average rating
-    const newTotalOrders = provider.totalOrders + 1;
-    const newRating =
-      (provider.rating * provider.totalOrders + rating) / newTotalOrders;
+    // Single-statement atomic update:
+    //   new_rating    = (old_rating * old_total + new_rating) / (old_total + 1)
+    //   new_total     = old_total + 1
+    // Round to 2 decimal places to match the previous behavior.
+    const affected = await this.prisma.$executeRaw`
+      UPDATE "Provider"
+      SET
+        rating = ROUND(
+          ((rating * "totalOrders") + ${rating})::numeric
+            / ("totalOrders" + 1)::numeric,
+          2
+        ),
+        "totalOrders" = "totalOrders" + 1
+      WHERE id = ${providerId}
+    `;
 
-    const updated = await this.prisma.provider.update({
+    if (affected === 0) {
+      throw new NotFoundException(`Provider ${providerId} not found`);
+    }
+
+    const updated = await this.prisma.provider.findUnique({
       where: { id: providerId },
-      data: {
-        rating: Math.round(newRating * 100) / 100,
-        totalOrders: newTotalOrders,
-      },
     });
 
     this.logger.log(
-      `Provider ${providerId} rated: ${rating}/5 (new avg: ${updated.rating})`,
+      `Provider ${providerId} rated: ${rating}/5 (new avg: ${updated?.rating})`,
     );
 
     return updated;
@@ -285,6 +358,10 @@ export class ProvidersService {
 
   /**
    * Setup external integration for a provider (Printful, Printify, Gooten).
+   *
+   * Validates credentials with the live API first, THEN encrypts and
+   * persists. Tokens are stored as AES-256-GCM ciphertext at rest so a
+   * database leak doesn't expose every provider's printer credentials.
    */
   async setupIntegration(
     providerId: string,
@@ -295,19 +372,24 @@ export class ProvidersService {
     const provider = await this.prisma.provider.findUnique({ where: { id: providerId } });
     if (!provider) throw new NotFoundException(`Provider ${providerId} not found`);
 
-    // Validate credentials
+    // Validate credentials against the upstream API with the PLAINTEXT
+    // values before encrypting and storing.
     const adapter = this.adapterFactory.getAdapter(integrationType, apiToken, apiSecret);
     const { valid, error } = await adapter.validateCredentials();
     if (!valid) {
       throw new BadRequestException(`Invalid credentials for ${integrationType}: ${error}`);
     }
 
+    const key = this.getEncryptionKey();
+    const encryptedToken = encrypt(apiToken, key);
+    const encryptedSecret = apiSecret ? encrypt(apiSecret, key) : null;
+
     const updated = await this.prisma.provider.update({
       where: { id: providerId },
       data: {
         integrationType,
-        apiToken,
-        apiSecret: apiSecret || null,
+        apiToken: encryptedToken,
+        apiSecret: encryptedSecret,
         integrationStatus: 'active',
       },
     });
@@ -326,10 +408,13 @@ export class ProvidersService {
       throw new BadRequestException('Provider has no integration configured');
     }
 
+    const apiToken = this.decryptProviderToken(provider.apiToken)!;
+    const apiSecret = this.decryptProviderToken(provider.apiSecret);
+
     const adapter = this.adapterFactory.getAdapter(
       provider.integrationType,
-      provider.apiToken,
-      provider.apiSecret || undefined,
+      apiToken,
+      apiSecret,
     );
 
     this.logger.log(`Syncing catalog from ${provider.integrationType} for provider ${providerId}...`);

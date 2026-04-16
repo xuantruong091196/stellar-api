@@ -171,27 +171,59 @@ export class StellarService implements OnModuleInit {
 
   /**
    * Submit a signed lock transaction (signed by merchant client-side).
+   *
+   * SECURITY: the caller trusts the client-supplied XDR, so we MUST
+   * validate it matches the escrow we built before submitting. Without
+   * this check, a merchant could request an unsigned XDR for 100 USDC,
+   * sign a DIFFERENT tx for 1 USDC (or a tx paying themselves, or a tx
+   * paying in a different asset), and call confirmLock — the DB would
+   * mark the escrow as funded for 100 USDC while only 1 USDC actually
+   * landed in the holding account. On release, the holding account would
+   * drain 99 USDC of real funds for every bogus lock.
+   *
    * Serialized via Redlock to prevent txBAD_SEQ.
    */
-  async submitLockTransaction(signedXdr: string): Promise<string> {
-    return this.withStellarLock(async () => {
-      this.logger.log('Submitting lock transaction to Stellar network');
+  async submitLockTransaction(
+    signedXdr: string,
+    expected: {
+      merchantAddress: string;
+      amountUsdc: number;
+      orderId: string;
+    },
+  ): Promise<string> {
+    if (!this.escrowKeypair) {
+      throw new Error('Escrow holding account not configured');
+    }
 
-      const transaction = StellarSdk.TransactionBuilder.fromXDR(
+    // Parse + validate BEFORE entering the lock so we don't hold it
+    // during error reporting.
+    let transaction: StellarSdk.Transaction;
+    try {
+      const parsed = StellarSdk.TransactionBuilder.fromXDR(
         signedXdr,
         this.networkPassphrase,
       );
+      if ('innerTransaction' in parsed) {
+        throw new Error('Fee-bump transactions are not accepted for lock');
+      }
+      transaction = parsed as StellarSdk.Transaction;
+    } catch (err) {
+      throw new Error(`Invalid signed XDR: ${(err as Error).message}`);
+    }
 
-      const result = await this.server.submitTransaction(
-        transaction as StellarSdk.Transaction,
-      );
+    this.assertLockTxMatchesExpected(transaction, expected);
+
+    return this.withStellarLock(async () => {
+      this.logger.log('Submitting lock transaction to Stellar network');
+
+      const result = await this.server.submitTransaction(transaction);
 
       await this.prisma.stellarTransaction.create({
         data: {
           txHash: result.hash,
           ledger: result.ledger,
           type: 'escrow_lock',
-          fromAddress: (transaction as StellarSdk.Transaction).source,
+          fromAddress: transaction.source,
           toAddress: this.escrowKeypair!.publicKey(),
           status: 'confirmed',
           rawXdr: signedXdr,
@@ -201,6 +233,79 @@ export class StellarService implements OnModuleInit {
       this.logger.log(`Lock tx submitted: hash=${result.hash}, ledger=${result.ledger}`);
       return result.hash;
     });
+  }
+
+  /**
+   * Verify that a client-signed lock transaction matches the escrow we
+   * built: correct source account, exactly one Payment op to the escrow
+   * holding account, correct USDC amount, correct asset.
+   *
+   * Any mismatch throws — the caller surfaces it as a 400 to the client.
+   */
+  private assertLockTxMatchesExpected(
+    tx: StellarSdk.Transaction,
+    expected: {
+      merchantAddress: string;
+      amountUsdc: number;
+      orderId: string;
+    },
+  ): void {
+    if (tx.source !== expected.merchantAddress) {
+      throw new Error(
+        `Lock tx source mismatch: expected ${expected.merchantAddress}, got ${tx.source}`,
+      );
+    }
+
+    const ops = tx.operations || [];
+    if (ops.length !== 1) {
+      throw new Error(
+        `Lock tx must contain exactly 1 operation (got ${ops.length})`,
+      );
+    }
+
+    const op = ops[0] as StellarSdk.Operation;
+    if (op.type !== 'payment') {
+      throw new Error(`Lock tx operation must be a payment (got ${op.type})`);
+    }
+
+    const payment = op as StellarSdk.Operation.Payment;
+    const escrowPubkey = this.escrowKeypair!.publicKey();
+    if (payment.destination !== escrowPubkey) {
+      throw new Error(
+        `Lock tx destination mismatch: expected ${escrowPubkey}, got ${payment.destination}`,
+      );
+    }
+
+    // Asset must be USDC issued by the configured issuer. Compare in a
+    // way that's tolerant of the way stellar-sdk constructs Asset objects.
+    const asset = payment.asset;
+    const assetCode =
+      typeof (asset as { code?: string }).code === 'string'
+        ? (asset as { code: string }).code
+        : asset.getCode();
+    const assetIssuer =
+      typeof (asset as { issuer?: string }).issuer === 'string'
+        ? (asset as { issuer: string }).issuer
+        : asset.getIssuer();
+    if (assetCode !== 'USDC' || assetIssuer !== this.usdcIssuer) {
+      throw new Error(
+        `Lock tx asset mismatch: expected USDC/${this.usdcIssuer}, got ${assetCode}/${assetIssuer}`,
+      );
+    }
+
+    // Amount compare: payment.amount is a string with 7 decimals. Compare
+    // the rounded numeric value to the expected amount (also rounded to 7).
+    const paidAmount = Number(payment.amount);
+    if (!Number.isFinite(paidAmount)) {
+      throw new Error(`Lock tx amount is not a number: ${payment.amount}`);
+    }
+    // Allow a tiny rounding tolerance (1 stroop).
+    const EPSILON = 1e-7;
+    if (Math.abs(paidAmount - expected.amountUsdc) > EPSILON) {
+      throw new Error(
+        `Lock tx amount mismatch: expected ${expected.amountUsdc}, got ${paidAmount}`,
+      );
+    }
   }
 
   /**
@@ -405,7 +510,10 @@ export class StellarService implements OnModuleInit {
 
       transaction.sign(this.systemKeypair!);
 
-      const result = await this.server.submitTransaction(transaction);
+      const result = await this.submitWithFeeBump(
+        transaction,
+        this.systemKeypair!,
+      );
 
       await this.prisma.stellarTransaction.create({
         data: {
@@ -432,18 +540,46 @@ export class StellarService implements OnModuleInit {
   /**
    * Execute a function while holding the Stellar tx lock.
    * Uses Redlock (Redis) with fallback to pg_advisory_lock.
+   *
+   * Watchdog extension: the lock has a 30s TTL, but slow Horizon responses
+   * (congestion, cold account load) can make `fn()` take longer. If we let
+   * the lock expire while we're still inside the critical section, a
+   * second worker can acquire the "expired" lock and submit a concurrent
+   * tx from the same holding account → sequence-number collision. The
+   * watchdog extends the lock every half-TTL until `fn()` resolves so the
+   * critical section stays protected for the full duration.
    */
   private async withStellarLock<T>(fn: () => Promise<T>): Promise<T> {
     // Try Redlock first
     if (this.redlock) {
       let lock: Lock | null = null;
+      let watchdog: NodeJS.Timeout | null = null;
       try {
         lock = await this.redlock.acquire(
           [STELLAR_TX_LOCK_KEY],
           STELLAR_TX_LOCK_TTL_MS,
         );
+
+        // Extend the lock every half-TTL. `redlock.extend` returns a new
+        // Lock instance pointing at the same resource, so keep the
+        // latest reference in a closure and use it on release.
+        const extendIntervalMs = Math.floor(STELLAR_TX_LOCK_TTL_MS / 2);
+        watchdog = setInterval(async () => {
+          if (!lock) return;
+          try {
+            lock = await lock.extend(STELLAR_TX_LOCK_TTL_MS);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to extend Redlock: ${(err as Error).message}`,
+            );
+          }
+        }, extendIntervalMs);
+
         return await fn();
       } finally {
+        if (watchdog) {
+          clearInterval(watchdog);
+        }
         if (lock) {
           try {
             await lock.release();
@@ -454,7 +590,10 @@ export class StellarService implements OnModuleInit {
       }
     }
 
-    // Fallback: pg_advisory_lock within a Prisma interactive transaction
+    // Fallback: pg_advisory_lock within a Prisma interactive transaction.
+    // The advisory lock is held for the duration of the transaction with
+    // no TTL, so slow Horizon responses are fine here — Prisma just keeps
+    // the DB connection open until fn() returns.
     this.logger.warn('Using pg_advisory_lock fallback (Redis unavailable)');
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(

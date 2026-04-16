@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { MockupService } from '../mockup/mockup.service';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
+import { safeImageFetch } from '../common/safe-fetch';
 import { CreateProductDto } from './dto/create-product.dto';
 
 @Injectable()
@@ -220,12 +221,76 @@ export class ProductsService {
     });
 
     try {
-      // 2. Upload mockup images to Shopify via staged uploads
-      // For now, skip actual image upload — use design thumbnailUrl as placeholder
+      // 2. Generate composite mockups and upload them to Shopify via staged uploads
       const mediaUrls: string[] = [];
-      if (product.design.thumbnailUrl) {
-        // In production: generate mockups per color, upload each via stagedUploadsCreate
-        mediaUrls.push(product.design.fileUrl);
+      try {
+        const blanks = product.providerProduct.blankImages as Record<string, string> | null;
+        const printCfg = product.printConfig as { printArea: string; x: number; y: number; scale: number; rotation: number } | null;
+
+        if (product.design.fileUrl && blanks && Object.keys(blanks).length > 0 && printCfg) {
+          // Generate per-color mockups (composites design onto blank product photos)
+          const mockups = await this.mockupService.generateProductMockups({
+            designId: product.designId,
+            designUrl: product.design.fileUrl,
+            blankImages: blanks,
+            printConfig: printCfg,
+            productType: product.providerProduct.productType,
+          });
+
+          if (mockups.length > 0) {
+            // Create staged upload targets on Shopify (one per mockup)
+            const stagedTargets = await this.shopifyGql.stagedUploadsCreate(
+              store.shopifyDomain,
+              accessToken,
+              mockups.map((m, i) => ({
+                filename: `mockup-${m.color.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i}.jpg`,
+                mimeType: 'image/jpeg' as const,
+                resource: 'IMAGE' as const,
+              })),
+            );
+
+            // Upload each mockup to its staged target then collect the Shopify CDN URL
+            await Promise.all(
+              mockups.map(async (mockup, i) => {
+                const target = stagedTargets[i];
+                if (!target) return;
+
+                let buffer: Buffer;
+                try {
+                  // safeImageFetch: 16MB cap, redirect: manual, 15s timeout,
+                  // content-type=image/* validation.
+                  buffer = await safeImageFetch(mockup.imageUrl);
+                } catch (err) {
+                  this.logger.warn(
+                    `Could not fetch R2 mockup for color ${mockup.color}: ${(err as Error).message}`,
+                  );
+                  return;
+                }
+
+                await this.shopifyGql.uploadToStagedTarget(
+                  target,
+                  buffer,
+                  `mockup-${mockup.color.toLowerCase().replace(/[^a-z0-9]/g, '-')}.jpg`,
+                  'image/jpeg',
+                );
+
+                mediaUrls.push(target.resourceUrl);
+              }),
+            );
+
+            this.logger.log(`Uploaded ${mediaUrls.length}/${mockups.length} mockup images to Shopify for product ${merchantProductId}`);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Mockup generation/upload failed for ${merchantProductId}, publishing without images: ${(err as Error).message}`,
+        );
+      }
+
+      // Fallback: use design thumbnail or file URL if mockup upload failed
+      if (mediaUrls.length === 0) {
+        const fallback = product.design.thumbnailUrl || product.design.fileUrl;
+        if (fallback) mediaUrls.push(fallback);
       }
 
       // 3. Build Shopify product input
@@ -268,34 +333,34 @@ export class ProductsService {
       // Extract numeric ID from GID
       const shopifyProductId = shopifyProductGid.replace('gid://shopify/Product/', '');
 
-      // 5. Update merchant product with Shopify IDs
-      const updated = await this.prisma.merchantProduct.update({
-        where: { id: merchantProductId },
-        data: {
-          shopifyProductId,
-          shopifyProductGid,
-          status: 'published',
-          publishedAt: new Date(),
-        },
-      });
+      // 5. Update merchant product with Shopify IDs + outbox atomically
+      const [updated] = await this.prisma.$transaction([
+        this.prisma.merchantProduct.update({
+          where: { id: merchantProductId },
+          data: {
+            shopifyProductId,
+            shopifyProductGid,
+            status: 'published',
+            publishedAt: new Date(),
+          },
+        }),
+        this.prisma.eventOutbox.create({
+          data: {
+            eventType: 'product.published',
+            storeId: product.storeId,
+            payload: {
+              merchantProductId,
+              title: product.title,
+              shopifyProductId,
+              storeId: product.storeId,
+            } as never,
+          },
+        }),
+      ]);
 
       this.logger.log(
         `Product published to Shopify: ${product.title} → ${shopifyProductGid} (${variantIds.length} variants)`,
       );
-
-      // Emit event
-      await this.prisma.eventOutbox.create({
-        data: {
-          eventType: 'product.published',
-          storeId: product.storeId,
-          payload: {
-            merchantProductId,
-            title: product.title,
-            shopifyProductId,
-            storeId: product.storeId,
-          } as never,
-        },
-      });
 
       return {
         ...updated,
@@ -307,25 +372,25 @@ export class ProductsService {
         },
       };
     } catch (err) {
-      // Revert to draft on failure (not 'error' — allows retry)
-      await this.prisma.merchantProduct.update({
-        where: { id: merchantProductId },
-        data: { status: 'draft' },
-      });
-
-      // Emit failure event
-      await this.prisma.eventOutbox.create({
-        data: {
-          eventType: 'product.publish_failed',
-          storeId: product.storeId,
-          payload: {
-            merchantProductId,
-            title: product.title,
-            error: (err as Error).message,
+      // Revert to draft + outbox atomically
+      await this.prisma.$transaction([
+        this.prisma.merchantProduct.update({
+          where: { id: merchantProductId },
+          data: { status: 'draft' },
+        }),
+        this.prisma.eventOutbox.create({
+          data: {
+            eventType: 'product.publish_failed',
             storeId: product.storeId,
-          } as never,
-        },
-      });
+            payload: {
+              merchantProductId,
+              title: product.title,
+              error: (err as Error).message,
+              storeId: product.storeId,
+            } as never,
+          },
+        }),
+      ]);
 
       this.logger.error(`Failed to publish product ${merchantProductId}: ${(err as Error).message}`);
       throw err;

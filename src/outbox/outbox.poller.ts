@@ -63,10 +63,18 @@ export class OutboxPoller {
 
   private async processEvent(event: OutboxRow) {
     try {
-      // Emit asynchronously, wait for all listeners to complete
+      // Emit asynchronously, wait for all listeners to complete.
+      // Spread payload FIRST, then set eventId — otherwise a payload that
+      // happens to contain its own `eventId` field would overwrite the
+      // authoritative outbox row id and break the notification listener's
+      // idempotency check (unique on eventId+recipientType+recipientId).
+      // Defensive null guard: payload column is JSON so technically could
+      // be null/non-object; spread of those is a no-op (`{...null} → {}`).
+      const payload =
+        event.payload && typeof event.payload === 'object' ? event.payload : {};
       await this.eventEmitter.emitAsync(event.eventType, {
+        ...payload,
         eventId: event.id,
-        ...event.payload,
       });
 
       await this.prisma.eventOutbox.update({

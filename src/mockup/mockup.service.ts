@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as sharp from 'sharp';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../prisma/prisma.service';
+import { safeImageFetch } from '../common/safe-fetch';
 
 /**
  * Product template definitions — where to place the design on the product image.
@@ -271,11 +272,7 @@ export class MockupService {
     // Fetch the design once
     let designBuffer: Buffer;
     try {
-      const designRes = await fetch(input.designUrl);
-      if (!designRes.ok) {
-        throw new Error(`Failed to fetch design: ${designRes.status}`);
-      }
-      designBuffer = Buffer.from(await designRes.arrayBuffer());
+      designBuffer = await safeImageFetch(input.designUrl);
     } catch (err) {
       this.logger.error(`Failed to load design ${input.designId}: ${(err as Error).message}`);
       return [];
@@ -335,12 +332,8 @@ export class MockupService {
     printConfig: { x: number; y: number; scale: number; rotation: number },
     designMeta: sharp.Metadata,
   ): Promise<Buffer> {
-    // Fetch blank product image
-    const blankRes = await fetch(blankUrl);
-    if (!blankRes.ok) {
-      throw new Error(`Failed to fetch blank image: ${blankRes.status}`);
-    }
-    const blankBuffer = Buffer.from(await blankRes.arrayBuffer());
+    // Fetch blank product image (size-capped, redirect-blocked, timeout)
+    const blankBuffer = await safeImageFetch(blankUrl);
 
     // Get blank dimensions
     const blankMeta = await sharp(blankBuffer).metadata();

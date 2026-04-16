@@ -46,6 +46,25 @@ export class S3Service {
     }
   }
 
+  /**
+   * Resolve `key` to an absolute path under `localUploadDir` and refuse any
+   * key that escapes the upload root. Callers pass user-controlled segments
+   * (e.g. original filename) inside `key`, so a key of `../../etc/passwd`
+   * must not be allowed to write outside the sandbox.
+   */
+  private safeLocalPath(key: string): string {
+    // Strip any leading slashes that would make path.resolve treat key as absolute.
+    const cleaned = key.replace(/^\/+/, '');
+    const resolved = path.resolve(this.localUploadDir, cleaned);
+    const root = this.localUploadDir.endsWith(path.sep)
+      ? this.localUploadDir
+      : this.localUploadDir + path.sep;
+    if (resolved !== this.localUploadDir && !resolved.startsWith(root)) {
+      throw new Error(`Invalid upload key (path traversal): ${key}`);
+    }
+    return resolved;
+  }
+
   async uploadFile(
     key: string,
     buffer: Buffer,
@@ -67,13 +86,13 @@ export class S3Service {
       return url;
     }
 
-    // Fallback: save to local filesystem
-    const filePath = path.join(this.localUploadDir, key);
+    // Fallback: save to local filesystem (dev or misconfigured prod).
+    const filePath = this.safeLocalPath(key);
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, buffer);
 
-    const localUrl = `/uploads/${key}`;
+    const localUrl = `/uploads/${key.replace(/^\/+/, '')}`;
     this.logger.log(`File saved locally: ${localUrl}`);
     return localUrl;
   }
@@ -90,8 +109,8 @@ export class S3Service {
       return;
     }
 
-    // Fallback: delete from local filesystem
-    const filePath = path.join(this.localUploadDir, key);
+    // Fallback: delete from local filesystem (traversal-safe).
+    const filePath = this.safeLocalPath(key);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
       this.logger.log(`File deleted locally: ${key}`);

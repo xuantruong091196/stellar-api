@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { safeImageFetchWithContentType } from '../common/safe-fetch';
 
 const FREEPIK_API = 'https://api.freepik.com/v1';
 
@@ -140,14 +141,13 @@ export class AiEnhanceService {
   }
 
   private async proxyImageToBase64(url: string): Promise<string> {
-    const res = await fetch(url);
-    if (!res.ok) {
-      this.logger.warn(`Failed to proxy image: ${res.status}`);
+    try {
+      const { buffer, contentType } = await safeImageFetchWithContentType(url);
+      return `data:${contentType};base64,${buffer.toString('base64')}`;
+    } catch (err) {
+      this.logger.warn(`Failed to proxy image: ${(err as Error).message}`);
       return url;
     }
-    const contentType = res.headers.get('content-type') || 'image/jpeg';
-    const buffer = Buffer.from(await res.arrayBuffer());
-    return `data:${contentType};base64,${buffer.toString('base64')}`;
   }
 
   private async pollTask(taskId: string, maxAttempts = 30): Promise<string> {

@@ -16,11 +16,13 @@ export class QueryOrdersDto {
     description: 'Page number (starts at 1)',
     default: 1,
     minimum: 1,
+    maximum: 10000,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(10_000)
   page?: number = 1;
 
   @ApiPropertyOptional({

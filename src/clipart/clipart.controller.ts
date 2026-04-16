@@ -3,6 +3,13 @@ import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 import { FreepikSource } from './freepik.source';
 import { AiEnhanceService } from './ai-enhance.service';
+import { safeImageFetchWithContentType } from '../common/safe-fetch';
+import {
+  AiRemoveBgDto,
+  AiUpscaleDto,
+  AiEnhanceDto,
+  AiGenerateDto,
+} from './dto/ai-image.dto';
 
 const FREEPIK_API_KEY = process.env.FREEPIK_API_KEY || '';
 
@@ -33,7 +40,6 @@ export class ClipartController {
     );
   }
 
-  @Public()
   @Get('download/:id')
   @ApiOperation({ summary: 'Get download URL for a clipart item' })
   async download(@Param('id') id: string) {
@@ -44,7 +50,6 @@ export class ClipartController {
     return { url };
   }
 
-  @Public() // TODO: add per-user auth when Shopify session tokens are wired to frontend API calls
   @Post('ai-enhance')
   @ApiOperation({
     summary: 'AI-enhance a draft design using Freepik Reimagine',
@@ -52,31 +57,16 @@ export class ClipartController {
       'Sends the canvas export (base64 PNG) to Freepik AI for professional re-rendering. ' +
       'Optionally upscales the result to 2x or 4x for print quality.',
   })
-  async aiEnhance(
-    @Body()
-    dto: {
-      imageBase64: string;
-      prompt?: string;
-      strength?: number;
-      upscale?: '2x' | '4x' | null;
-      productType?: string;
-      printMethod?: string;
-      layerDescriptions?: string;
-      aspectRatio?: number;
-    },
-  ) {
+  async aiEnhance(@Body() dto: AiEnhanceDto) {
     if (!FREEPIK_API_KEY) {
       return { error: 'Freepik API key not configured' };
     }
     return this.aiEnhanceService.enhance(dto);
   }
 
-  @Public()
   @Post('ai-remove-bg')
   @ApiOperation({ summary: 'Remove background from an image' })
-  async aiRemoveBg(
-    @Body() dto: { imageBase64: string },
-  ) {
+  async aiRemoveBg(@Body() dto: AiRemoveBgDto) {
     if (!FREEPIK_API_KEY) {
       return { error: 'Freepik API key not configured' };
     }
@@ -112,17 +102,9 @@ export class ClipartController {
     }
   }
 
-  @Public()
   @Post('ai-generate')
   @ApiOperation({ summary: 'Generate image from text prompt' })
-  async aiGenerate(
-    @Body() dto: {
-      prompt: string;
-      style?: string;
-      transparentBg?: boolean;
-      aspectRatio?: string;
-    },
-  ) {
+  async aiGenerate(@Body() dto: AiGenerateDto) {
     if (!FREEPIK_API_KEY) {
       return { error: 'Freepik API key not configured' };
     }
@@ -182,12 +164,9 @@ export class ClipartController {
     }
   }
 
-  @Public()
   @Post('ai-upscale')
   @ApiOperation({ summary: 'Upscale an image' })
-  async aiUpscale(
-    @Body() dto: { imageBase64: string; scale?: '2x' | '4x' },
-  ) {
+  async aiUpscale(@Body() dto: AiUpscaleDto) {
     if (!FREEPIK_API_KEY) {
       return { error: 'Freepik API key not configured' };
     }
@@ -242,10 +221,14 @@ export class ClipartController {
   }
 
   private async proxyToBase64(url: string): Promise<string> {
-    const res = await fetch(url);
-    if (!res.ok) return url;
-    const contentType = res.headers.get('content-type') || 'image/png';
-    const buffer = Buffer.from(await res.arrayBuffer());
-    return `data:${contentType};base64,${buffer.toString('base64')}`;
+    try {
+      const { buffer, contentType } = await safeImageFetchWithContentType(url);
+      return `data:${contentType};base64,${buffer.toString('base64')}`;
+    } catch {
+      // Fall back to the upstream URL on any safe-fetch failure (size cap,
+      // redirect, non-image content type). The client can still render via
+      // the proxy-less image, just without our base64 wrapping.
+      return url;
+    }
   }
 }

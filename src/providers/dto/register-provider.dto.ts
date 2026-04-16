@@ -5,7 +5,10 @@ import {
   IsArray,
   IsInt,
   Min,
+  Max,
   Length,
+  MinLength,
+  MaxLength,
   Matches,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -13,6 +16,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export class RegisterProviderDto {
   @ApiProperty({ example: 'PrintCo Global', description: 'Provider name' })
   @IsString()
+  @MinLength(2)
+  @MaxLength(100)
   name: string;
 
   @ApiProperty({
@@ -30,6 +35,7 @@ export class RegisterProviderDto {
     description: 'Provider contact email',
   })
   @IsEmail()
+  @MaxLength(254)
   contactEmail: string;
 
   @ApiProperty({
@@ -44,11 +50,12 @@ export class RegisterProviderDto {
 
   @ApiPropertyOptional({
     example: ['dtg', 'screen-print', 'embroidery'],
-    description: 'List of printing specialties',
+    description: 'List of printing specialties (max 20)',
   })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
+  @MaxLength(50, { each: true })
   specialties?: string[];
 
   @ApiPropertyOptional({
@@ -59,6 +66,7 @@ export class RegisterProviderDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(1_000_000)
   minOrderQty?: number;
 
   @ApiPropertyOptional({
@@ -69,5 +77,6 @@ export class RegisterProviderDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(365)
   avgLeadDays?: number;
 }

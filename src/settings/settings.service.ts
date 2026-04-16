@@ -18,6 +18,8 @@ interface UpdateStoreSettingsInput {
   notificationEmail?: string | null;
   emailEnabled?: boolean;
   inAppEnabled?: boolean;
+  // Payout address (on Store model, not StoreSettings)
+  stellarAddress?: string | null;
 }
 
 interface UpdateProviderSettingsInput {
@@ -44,6 +46,9 @@ export class SettingsService {
 
   async getStoreSettings(storeId: string, callerStoreId: string) {
     if (storeId !== callerStoreId) throw new ForbiddenException();
+
+    const store = await this.prisma.store.findUnique({ where: { id: storeId } });
+
     let settings = await this.prisma.storeSettings.findUnique({
       where: { storeId },
     });
@@ -52,8 +57,16 @@ export class SettingsService {
         data: { storeId },
       });
     }
-    // Hide raw secret in API response, only show prefix
-    return this.maskStoreSecret(settings);
+
+    // Merge store-level fields (shopify connection, wallet, payout) into response
+    // so the FE has everything it needs in one call.
+    return {
+      ...this.maskStoreSecret(settings),
+      shopifyDomain: store?.shopifyDomain ?? null,
+      shopifyConnected: store != null && !!store.shopifyToken && !store.shopifyDomain.includes('.stelo.life'),
+      walletAddress: store?.walletAddress ?? null,
+      stellarAddress: store?.stellarAddress ?? null,
+    };
   }
 
   async updateStoreSettings(
@@ -63,17 +76,28 @@ export class SettingsService {
   ) {
     if (storeId !== callerStoreId) throw new ForbiddenException();
 
-    // Ensure exists
-    await this.prisma.storeSettings.upsert({
-      where: { storeId },
-      create: { storeId },
-      update: {},
+    const { stellarAddress, ...settingsInput } = input;
+
+    // Atomic: settings upsert + optional store payout update in one transaction.
+    // Without this, a failure between the two writes could leave stellarAddress
+    // updated but the rest of the settings unchanged (or vice-versa).
+    const settings = await this.prisma.$transaction(async (tx) => {
+      const upserted = await tx.storeSettings.upsert({
+        where: { storeId },
+        create: { storeId, ...settingsInput },
+        update: settingsInput,
+      });
+
+      if (stellarAddress !== undefined) {
+        await tx.store.update({
+          where: { id: storeId },
+          data: { stellarAddress: stellarAddress ?? null },
+        });
+      }
+
+      return upserted;
     });
 
-    const settings = await this.prisma.storeSettings.update({
-      where: { storeId },
-      data: input,
-    });
     return this.maskStoreSecret(settings);
   }
 
@@ -138,15 +162,10 @@ export class SettingsService {
   ) {
     if (providerId !== callerProviderId) throw new ForbiddenException();
 
-    await this.prisma.providerSettings.upsert({
+    const settings = await this.prisma.providerSettings.upsert({
       where: { providerId },
-      create: { providerId },
-      update: {},
-    });
-
-    const settings = await this.prisma.providerSettings.update({
-      where: { providerId },
-      data: input,
+      create: { providerId, ...input },
+      update: input,
     });
     return this.maskProviderSecret(settings);
   }
@@ -174,23 +193,28 @@ export class SettingsService {
 
   // ─── Helpers ──────────────────────────────────────
 
-  private maskStoreSecret<T extends { webhookSecret?: string | null }>(s: T): T {
-    if (s.webhookSecret) {
-      return {
-        ...s,
-        webhookSecret: `${s.webhookSecret.slice(0, 8)}...${s.webhookSecret.slice(-4)}`,
-      };
-    }
-    return s;
+  private maskStoreSecret<
+    T extends { webhookSecret?: string | null; webhookSecretPrev?: string | null },
+  >(s: T): T {
+    return {
+      ...s,
+      webhookSecret: this.redact(s.webhookSecret),
+      webhookSecretPrev: this.redact(s.webhookSecretPrev),
+    };
   }
 
-  private maskProviderSecret<T extends { webhookSecret?: string | null }>(s: T): T {
-    if (s.webhookSecret) {
-      return {
-        ...s,
-        webhookSecret: `${s.webhookSecret.slice(0, 8)}...${s.webhookSecret.slice(-4)}`,
-      };
-    }
-    return s;
+  private maskProviderSecret<
+    T extends { webhookSecret?: string | null; webhookSecretPrev?: string | null },
+  >(s: T): T {
+    return {
+      ...s,
+      webhookSecret: this.redact(s.webhookSecret),
+      webhookSecretPrev: this.redact(s.webhookSecretPrev),
+    };
+  }
+
+  private redact(secret: string | null | undefined): string | null {
+    if (!secret) return secret ?? null;
+    return `${secret.slice(0, 8)}...${secret.slice(-4)}`;
   }
 }

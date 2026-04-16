@@ -12,7 +12,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Observable, fromEvent, takeUntil, map, merge, interval } from 'rxjs';
+import { Observable, map, merge, interval, finalize } from 'rxjs';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { Public } from '../auth/decorators/public.decorator';
@@ -115,13 +115,19 @@ export class NotificationsController {
     const recipientType = session.recipientType as RecipientType;
     const recipientId = session.recipientId;
 
-    const subject = this.notifications.getStream(recipientType, recipientId);
+    const { subject, close } = this.notifications.openStream(
+      recipientType,
+      recipientId,
+    );
 
     // Heartbeat every 30s to keep connection alive
     const heartbeat = interval(30000).pipe(
       map(() => ({ type: 'heartbeat', data: JSON.stringify({ ts: Date.now() }) }) as unknown as MessageEvent),
     );
 
-    return merge(subject.asObservable(), heartbeat);
+    // `finalize` fires when the SSE connection closes (client disconnect,
+    // tab close, network drop). This is what prevents the per-recipient
+    // Subject Set from growing unbounded.
+    return merge(subject.asObservable(), heartbeat).pipe(finalize(close));
   }
 }

@@ -5,7 +5,11 @@ import {
   IsArray,
   IsInt,
   Min,
+  Max,
   Length,
+  MinLength,
+  MaxLength,
+  Matches,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -13,6 +17,8 @@ export class UpdateProviderDto {
   @ApiPropertyOptional({ example: 'PrintCo Global', description: 'Provider name' })
   @IsOptional()
   @IsString()
+  @MinLength(2)
+  @MaxLength(100)
   name?: string;
 
   @ApiPropertyOptional({
@@ -32,6 +38,7 @@ export class UpdateProviderDto {
   })
   @IsOptional()
   @IsEmail()
+  @MaxLength(254)
   contactEmail?: string;
 
   @ApiPropertyOptional({
@@ -40,34 +47,42 @@ export class UpdateProviderDto {
   })
   @IsOptional()
   @IsString()
+  @Matches(/^G[A-Z2-7]{55}$/, {
+    message: 'stellarAddress must be a valid Stellar public key',
+  })
   stellarAddress?: string;
 
   @ApiPropertyOptional({
     example: ['dtg', 'screen-print', 'embroidery'],
-    description: 'List of printing specialties',
+    description: 'List of printing specialties (max 20)',
   })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
+  @MaxLength(50, { each: true })
   specialties?: string[];
 
   @ApiPropertyOptional({
     example: 10,
     description: 'Minimum order quantity',
     minimum: 1,
+    maximum: 1_000_000,
   })
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(1_000_000)
   minOrderQty?: number;
 
   @ApiPropertyOptional({
     example: 5,
     description: 'Average lead time in days',
     minimum: 1,
+    maximum: 365,
   })
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(365)
   avgLeadDays?: number;
 }

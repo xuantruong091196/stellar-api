@@ -9,6 +9,8 @@ import {
 import { Public } from '../auth/decorators/public.decorator';
 import { ProviderAuthService } from './provider-auth.service';
 import { ProviderAuthGuard } from './provider-auth.guard';
+import { RegisterProviderAuthDto } from './dto/register-provider-auth.dto';
+import { LoginProviderAuthDto } from './dto/login-provider-auth.dto';
 
 @Controller('provider-auth')
 export class ProviderAuthController {
@@ -16,16 +18,7 @@ export class ProviderAuthController {
 
   @Public()
   @Post('register')
-  async register(
-    @Body()
-    body: {
-      email: string;
-      password: string;
-      name: string;
-      country: string;
-      stellarAddress: string;
-    },
-  ) {
+  async register(@Body() body: RegisterProviderAuthDto) {
     return this.providerAuth.register(
       body.email,
       body.password,
@@ -38,7 +31,7 @@ export class ProviderAuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
-  async login(@Body() body: { email: string; password: string }) {
+  async login(@Body() body: LoginProviderAuthDto) {
     return this.providerAuth.login(body.email, body.password);
   }
 

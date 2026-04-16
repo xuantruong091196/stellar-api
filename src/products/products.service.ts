@@ -172,11 +172,22 @@ export class ProductsService {
 
     const store = product.store;
 
-    // If store has no Shopify token (wallet-only stores or demo), skip
-    // the real Shopify API call and mark product as published locally.
-    // When the merchant later connects their Shopify store, products
-    // can be synced in bulk.
-    if (!store.shopifyToken || store.shopifyToken === 'dev-token' || store.plan === 'dev') {
+    // Real Shopify publish requires an OAuth-linked store. Wallet-only
+    // stores have no `shopifyToken` yet; silently "demo-publishing" used
+    // to return `success: true` with a fake id, which made the merchant
+    // think their product was live on Shopify when it wasn't on Shopify
+    // at all. Fail loudly so the UI can prompt them to connect Shopify.
+    //
+    // `dev-token` / `plan = 'dev'` is the docker-compose dev-only bypass
+    // path; production merchants never hit it.
+    const isDevStore =
+      store.shopifyToken === 'dev-token' || store.plan === 'dev';
+    if (!store.shopifyToken && !isDevStore) {
+      throw new BadRequestException(
+        'Shopify store is not connected. Install the Stelo Shopify app first (Settings → Connect Shopify) before publishing products.',
+      );
+    }
+    if (isDevStore) {
       const fakeShopifyProductId = `demo-${merchantProductId.slice(0, 12)}`;
       const updated = await this.prisma.merchantProduct.update({
         where: { id: merchantProductId },
@@ -188,7 +199,7 @@ export class ProductsService {
         },
       });
       this.logger.log(
-        `[DEMO] Product "${product.title}" marked as published without hitting Shopify`,
+        `[DEV-STORE] Product "${product.title}" marked as published without hitting Shopify`,
       );
       return {
         ...updated,
@@ -329,6 +340,44 @@ export class ProductsService {
         shopifyInput,
         mediaUrls.length > 0 ? mediaUrls : undefined,
       );
+
+      // 4b. Publish to Online Store sales channel so customers actually
+      // see it on the storefront. `productCreate` alone leaves the
+      // product in admin with `publishedOnCurrentPublication = false`;
+      // this call is what makes it visible. Failure here is non-fatal
+      // — the product exists in admin, merchant can publish manually —
+      // so we log and continue instead of rolling back.
+      try {
+        const publications = await this.shopifyGql.listPublications(
+          store.shopifyDomain,
+          accessToken,
+        );
+        // Online Store is the storefront channel; POS / Buy Button etc.
+        // are optional. Only target channels the merchant can actually
+        // use to reach end customers.
+        const targetPublicationIds = publications
+          .filter((p) => /online store|shop/i.test(p.name))
+          .map((p) => p.id);
+        if (targetPublicationIds.length > 0) {
+          await this.shopifyGql.publishablePublish(
+            store.shopifyDomain,
+            accessToken,
+            shopifyProductGid,
+            targetPublicationIds,
+          );
+          this.logger.log(
+            `Published ${shopifyProductGid} to ${targetPublicationIds.length} publication(s)`,
+          );
+        } else {
+          this.logger.warn(
+            `No Online Store publication found for ${store.shopifyDomain} — product will remain unpublished`,
+          );
+        }
+      } catch (publishErr) {
+        this.logger.warn(
+          `publishablePublish failed for ${shopifyProductGid}: ${(publishErr as Error).message}`,
+        );
+      }
 
       // Extract numeric ID from GID
       const shopifyProductId = shopifyProductGid.replace('gid://shopify/Product/', '');

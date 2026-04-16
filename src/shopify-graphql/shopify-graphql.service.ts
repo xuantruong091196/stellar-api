@@ -232,6 +232,64 @@ export class ShopifyGraphqlService {
   }
 
   /**
+   * List the shop's publications (sales channels). We need the "Online
+   * Store" publication id to make a new product visible on the
+   * storefront — `productCreate` alone puts the product in admin
+   * (status=ACTIVE) but leaves it unpublished to every channel, so
+   * customers never see it.
+   */
+  async listPublications(
+    shopDomain: string,
+    accessToken: string,
+  ): Promise<Array<{ id: string; name: string }>> {
+    const gql = `
+      query publications {
+        publications(first: 20) {
+          edges { node { id name } }
+        }
+      }
+    `;
+    const result = await this.query<{
+      publications: { edges: Array<{ node: { id: string; name: string } }> };
+    }>(shopDomain, accessToken, gql);
+    return result.publications.edges.map((e) => e.node);
+  }
+
+  /**
+   * Publish a product to the given publications (sales channels).
+   * Used right after `productCreate` to expose the product on the
+   * Online Store storefront. Without this step the product is in the
+   * admin but hidden from customers.
+   */
+  async publishablePublish(
+    shopDomain: string,
+    accessToken: string,
+    productGid: string,
+    publicationIds: string[],
+  ): Promise<void> {
+    const mutation = `
+      mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+        publishablePublish(id: $id, input: $input) {
+          publishable { __typename }
+          userErrors { field message }
+        }
+      }
+    `;
+    // `__typename` is the minimal valid selection on the `publishable`
+    // interface return; we only care about `userErrors`.
+    const input = publicationIds.map((id) => ({ publicationId: id }));
+    const result = await this.query<{
+      publishablePublish: { userErrors: UserError[] };
+    }>(shopDomain, accessToken, mutation, { id: productGid, input });
+    const errs = result.publishablePublish.userErrors;
+    if (errs.length > 0) {
+      throw new Error(
+        `publishablePublish failed: ${errs.map((e) => `${e.field?.join('.') || '?'}: ${e.message}`).join(', ')}`,
+      );
+    }
+  }
+
+  /**
    * Delete a product from Shopify.
    */
   async productDelete(

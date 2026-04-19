@@ -27,6 +27,8 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { WebhooksOutboundModule } from './webhooks-outbound/webhooks-outbound.module';
 import { SettingsModule } from './settings/settings.module';
 import { NotificationsCleanupModule } from './notifications-cleanup/notifications-cleanup.module';
+import { NftModule } from './nft/nft.module';
+import { BuyerModule } from './buyer/buyer.module';
 
 @Module({
   imports: [
@@ -58,6 +60,8 @@ import { NotificationsCleanupModule } from './notifications-cleanup/notification
     WebhooksOutboundModule,
     SettingsModule,
     NotificationsCleanupModule,
+    NftModule,
+    BuyerModule,
   ],
   providers: [
     {

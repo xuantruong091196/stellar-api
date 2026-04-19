@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
 import { EscrowService } from '../escrow/escrow.service';
+import { OrdersService } from '../orders/orders.service';
 
 const STATUS_FLOW = [
   'pending',
@@ -29,6 +30,7 @@ export class ProviderOrdersService {
     private readonly shopifyGraphql: ShopifyGraphqlService,
     private readonly shopifyAuth: ShopifyAuthService,
     private readonly escrowService: EscrowService,
+    private readonly ordersService: OrdersService,
   ) {}
 
   /**
@@ -162,6 +164,25 @@ export class ProviderOrdersService {
       `ProviderOrder ${providerOrderId} status updated: ${providerOrder.status} → ${newStatus}`,
     );
 
+    // Update NFT physical status to track fulfillment progress
+    const nftStatusMap: Record<string, 'IN_PRODUCTION' | 'SHIPPED' | 'DELIVERED'> = {
+      printing: 'IN_PRODUCTION',
+      quality_check: 'IN_PRODUCTION',
+      packing: 'IN_PRODUCTION',
+      shipped: 'SHIPPED',
+      delivered: 'DELIVERED',
+    };
+    const nftPhysicalStatus = nftStatusMap[newStatus];
+    if (nftPhysicalStatus) {
+      this.ordersService
+        .updateNftPhysicalStatus(providerOrder.orderId, nftPhysicalStatus)
+        .catch((err: Error) => {
+          this.logger.error(
+            `NFT physical status update failed for order ${providerOrder.orderId}: ${err.message}`,
+          );
+        });
+    }
+
     // Auto-release escrow when provider confirms delivery.
     // Fire-and-forget — delivery status is committed regardless of release outcome.
     // Failed releases revert to LOCKED and are retried via cron or manual action.
@@ -242,6 +263,15 @@ export class ProviderOrdersService {
         },
       }),
     ]);
+
+    // Update NFT physical status to SHIPPED
+    this.ordersService
+      .updateNftPhysicalStatus(providerOrder.order.id, 'SHIPPED')
+      .catch((err: Error) => {
+        this.logger.error(
+          `NFT physical status update failed for order ${providerOrder.order.id}: ${err.message}`,
+        );
+      });
 
     // Trigger Shopify fulfillment if the order has a Shopify GID
     const order = providerOrder.order;

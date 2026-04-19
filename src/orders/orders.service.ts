@@ -7,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EscrowService } from '../escrow/escrow.service';
+import { NftService } from '../nft/nft.service';
+import { PackingSlipService } from '../packing-slip/packing-slip.service';
 import { ProviderAdapterFactory } from '../providers/integrations/provider-adapter.factory';
 import { ProvidersService } from '../providers/providers.service';
 import { OrderStatus, EscrowStatus } from '../../generated/prisma';
@@ -51,6 +53,8 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly escrow: EscrowService,
+    private readonly nftService: NftService,
+    private readonly packingSlipService: PackingSlipService,
     private readonly adapterFactory: ProviderAdapterFactory,
     private readonly providers: ProvidersService,
   ) {}
@@ -92,6 +96,10 @@ export class OrdersService {
         this.logger.error(
           `autoInitEscrows failed for order ${existing.id}: ${err.message}`,
         );
+      });
+      // Fire-and-forget NFT minting (idempotent — mintForOrder skips already-minted items)
+      this.fireAndForgetNftMinting(existing.id, storeId, payload).catch((err: Error) => {
+        this.logger.error(`NFT minting failed for order ${existing.id}: ${err.message}`);
       });
       return existing;
     }
@@ -178,6 +186,11 @@ export class OrdersService {
       this.logger.error(
         `autoInitEscrows failed for order ${order.id}: ${err.message}`,
       );
+    });
+
+    // Fire-and-forget NFT minting
+    this.fireAndForgetNftMinting(order.id, storeId, payload).catch((err: Error) => {
+      this.logger.error(`NFT minting failed for order ${order.id}: ${err.message}`);
     });
 
     return order;
@@ -533,6 +546,12 @@ export class OrdersService {
         continue;
       }
 
+      // Burn-to-claim products are NFT-only — no physical fulfillment needed
+      if ((merchantProduct as any).isBurnToClaim) {
+        this.logger.log(`Skipping ProviderOrder for burn-to-claim product ${merchantProduct.id}`);
+        continue;
+      }
+
       const providerId = merchantProduct.providerProduct.providerId;
       const quantity = Number(item.quantity || 1);
       const itemBaseCost = merchantProduct.baseCost * quantity;
@@ -696,10 +715,41 @@ export class OrdersService {
       email: payload.email ? String(payload.email) : undefined,
     };
 
+    // Generate packing slip with QR codes for any minted NFTs
+    let packingSlipUrl: string | undefined;
+    const providerOrderRecord = await this.prisma.providerOrder.findUnique({
+      where: { id: providerOrderId },
+      select: { orderId: true },
+    });
+    if (providerOrderRecord) {
+      const orderNfts = await (this.prisma as any).nftToken.findMany({
+        where: { orderId: providerOrderRecord.orderId, status: 'MINTED' },
+        include: { merchantProduct: { include: { providerProduct: { include: { provider: true } } } } },
+      });
+
+      if (orderNfts.length > 0) {
+        try {
+          packingSlipUrl = await this.packingSlipService.generate(
+            providerOrderRecord.orderId,
+            orderNfts.map((n: any) => ({
+              id: n.id,
+              assetCode: n.assetCode,
+              serialNumber: n.serialNumber,
+              productTitle: n.merchantProduct.title,
+              designerName: n.merchantProduct.providerProduct?.provider?.name || 'Stelo',
+            })),
+          );
+        } catch (err) {
+          this.logger.warn(`Packing slip generation failed: ${(err as Error).message}`);
+        }
+      }
+    }
+
     const result = await adapter.submitOrder({
       externalOrderRef: providerOrderId,
       items,
       shippingAddress,
+      packingSlipUrl,
     });
 
     await this.prisma.providerOrder.update({
@@ -714,6 +764,66 @@ export class OrdersService {
     this.logger.log(
       `ProviderOrder ${providerOrderId} submitted to ${provider.integrationType}: external ID ${result.externalOrderId}`,
     );
+  }
+
+  /**
+   * Fire-and-forget NFT minting for an order. Re-queries the order with
+   * the deep includes that NftService.mintForOrder requires.
+   */
+  private async fireAndForgetNftMinting(
+    orderId: string,
+    storeId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    // Cast through `any` because the OrderItem → MerchantProduct relation
+    // isn't in generated types until `prisma generate` runs with the new schema.
+    const orderWithItems: any = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          include: {
+            merchantProduct: {
+              include: {
+                design: { include: { mockups: true } },
+                providerProduct: { include: { provider: true } },
+              },
+            },
+          },
+        },
+      },
+    } as any);
+    if (!orderWithItems) return;
+
+    const customer = payload.customer as Record<string, unknown> | undefined;
+    const customerEmail = String(customer?.email || payload.email || '');
+    if (!customerEmail) return;
+
+    await this.nftService.mintForOrder({
+      id: orderWithItems.id,
+      storeId,
+      customerEmail,
+      items: orderWithItems.items
+        .filter((item: any) => item.merchantProduct)
+        .map((item: any) => ({
+          id: item.id,
+          merchantProductId: item.merchantProductId,
+          merchantProduct: item.merchantProduct,
+        })),
+    });
+  }
+
+  /**
+   * Update NFT physical status when a shipment event is received.
+   */
+  async updateNftPhysicalStatus(
+    orderId: string,
+    physicalStatus: 'IN_PRODUCTION' | 'SHIPPED' | 'DELIVERED',
+  ): Promise<void> {
+    await (this.prisma as any).nftToken.updateMany({
+      where: { orderId },
+      data: { physicalStatus },
+    });
+    this.logger.log(`NFT physicalStatus updated to ${physicalStatus} for order ${orderId}`);
   }
 
   /**

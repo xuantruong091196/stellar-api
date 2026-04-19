@@ -156,7 +156,7 @@ export class PrintfulAdapter implements IProviderAdapter {
       };
     });
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       external_id: input.externalOrderRef,
       shipping: 'STANDARD',
       recipient: {
@@ -172,6 +172,16 @@ export class PrintfulAdapter implements IProviderAdapter {
       },
       items,
     };
+
+    // Include packing slip with NFT authenticity QR codes if available
+    if (input.packingSlipUrl) {
+      payload.packing_slip = {
+        email: input.shippingAddress.email || '',
+        phone: input.shippingAddress.phone || '',
+        message: 'Your purchase includes a blockchain-verified digital certificate. Scan the QR code to verify authenticity.',
+        logo_url: input.packingSlipUrl,
+      };
+    }
 
     const order = await this.request<{
       id: number;

@@ -10,7 +10,8 @@ export type NotificationCategory =
   | 'shipping'
   | 'disputes'
   | 'products'
-  | 'system';
+  | 'system'
+  | 'nft';
 
 export type NotificationType =
   | 'order.created'
@@ -30,7 +31,10 @@ export type NotificationType =
   | 'dispute.resolved'
   | 'product.published'
   | 'product.publish_failed'
-  | 'webhook.auto_disabled';
+  | 'webhook.auto_disabled'
+  | 'nft.minting'
+  | 'nft.ready'
+  | 'nft.mint_failed';
 
 export type EmailPriority = 'critical' | 'important' | 'info';
 
@@ -53,6 +57,9 @@ export const EVENT_CATEGORY_MAP: Record<NotificationType, NotificationCategory> 
   'product.published': 'products',
   'product.publish_failed': 'products',
   'webhook.auto_disabled': 'system',
+  'nft.minting': 'nft',
+  'nft.ready': 'nft',
+  'nft.mint_failed': 'nft',
 };
 
 export const EVENT_PRIORITY_MAP: Record<NotificationType, EmailPriority> = {
@@ -74,6 +81,9 @@ export const EVENT_PRIORITY_MAP: Record<NotificationType, EmailPriority> = {
   'product.published': 'info',
   'product.publish_failed': 'important',
   'webhook.auto_disabled': 'critical',
+  'nft.minting': 'info',
+  'nft.ready': 'important',
+  'nft.mint_failed': 'critical',
 };
 
 export interface CreateNotificationInput {

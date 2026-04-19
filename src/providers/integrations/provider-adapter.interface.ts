@@ -47,6 +47,8 @@ export interface SubmitOrderInput {
     phone?: string;
     email?: string;
   };
+  /** URL to a packing slip PDF (included in physical shipment) */
+  packingSlipUrl?: string;
 }
 
 export interface SubmitOrderResult {

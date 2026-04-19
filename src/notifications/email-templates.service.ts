@@ -310,5 +310,43 @@ export class EmailTemplatesService {
         ),
       };
     },
+
+    'nft.minting': (p, ctx) => {
+      const orderNumber = ctx.esc(p.shopifyOrderNumber || p.orderId);
+      const assetCode = ctx.esc(p.assetCode);
+      return {
+        subject: `NFT minting in progress — ${String(p.assetCode || '')}`,
+        html: ctx.layout(
+          `NFT minting started`,
+          `<p style="color:#cbd5e1;font-size:14px;line-height:1.6;">A digital certificate (<strong style="color:#22d3ee;">${assetCode}</strong>) is being minted on the Stellar blockchain for order #${orderNumber}.</p><p style="color:#94a3b8;font-size:13px;">You'll receive another email once it's ready.</p>`,
+        ),
+      };
+    },
+
+    'nft.ready': (p, ctx) => {
+      const assetCode = ctx.esc(p.assetCode);
+      const txLink = p.mintTxHash ? `${ctx.EXPLORER_BASE}/tx/${p.mintTxHash}` : null;
+      return {
+        subject: `Your NFT is ready — ${String(p.assetCode || '')}`,
+        html: ctx.layout(
+          `Digital certificate minted`,
+          `<p style="color:#cbd5e1;font-size:14px;line-height:1.6;">Your digital certificate <strong style="color:#22d3ee;">${assetCode}</strong> has been minted and is now live on the Stellar blockchain.</p>${txLink ? `<p style="margin-top:12px;"><a href="${txLink}" style="color:#22d3ee;font-size:12px;">View transaction on Stellar Explorer →</a></p>` : ''}`,
+          p.nftId ? { url: `${ctx.APP_BASE}/verify/${encodeURIComponent(String(p.nftId))}`, label: 'View certificate' } : undefined,
+        ),
+      };
+    },
+
+    'nft.mint_failed': (p, ctx) => {
+      const assetCode = ctx.esc(p.assetCode);
+      const err = ctx.esc(p.error || 'Unknown error');
+      return {
+        subject: `NFT minting failed — ${String(p.assetCode || '')}`,
+        html: ctx.layout(
+          `NFT minting failed`,
+          `<p style="color:#fca5a5;font-size:14px;line-height:1.6;">Minting of digital certificate <strong>${assetCode}</strong> failed.<br>Error: ${err}</p><p style="color:#cbd5e1;">Our team has been notified. The system will retry automatically.</p>`,
+          { url: `${ctx.APP_BASE}/orders/${encodeURIComponent(String(p.orderId ?? ''))}`, label: 'View order' },
+        ),
+      };
+    },
   };
 }

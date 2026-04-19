@@ -5,9 +5,10 @@ import { ShopifyGraphqlModule } from '../shopify-graphql/shopify-graphql.module'
 import { AuthModule } from '../auth/auth.module';
 import { EscrowModule } from '../escrow/escrow.module';
 import { ProviderAuthModule } from '../provider-auth/provider-auth.module';
+import { OrdersModule } from '../orders/orders.module';
 
 @Module({
-  imports: [ShopifyGraphqlModule, AuthModule, EscrowModule, ProviderAuthModule],
+  imports: [ShopifyGraphqlModule, AuthModule, EscrowModule, ProviderAuthModule, OrdersModule],
   controllers: [ProviderOrdersController],
   providers: [ProviderOrdersService],
   exports: [ProviderOrdersService],

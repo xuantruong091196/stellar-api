@@ -34,6 +34,20 @@ enum EscrowStatus {
   EXPIRED
 }
 
+enum NftStatus {
+  MINTING
+  MINTED
+  TRANSFERRED
+  BURNED
+  MINT_FAILED
+}
+
+enum PhysicalStatus {
+  IN_PRODUCTION
+  SHIPPED
+  DELIVERED
+}
+
 // ─── Models ──────────────────────────────────────────────────────────
 
 model Store {
@@ -57,6 +71,8 @@ model Store {
   webhookLogs      WebhookLog[]
   merchantProducts MerchantProduct[]
   settings         StoreSettings?
+  storeIssuer      StoreIssuer?
+  nfts             NftToken[]
 }
 
 model Provider {
@@ -135,6 +151,7 @@ model Design {
   mockups          Mockup[]
   orderItems       OrderItem[]
   merchantProducts MerchantProduct[]
+  nfts             NftToken[]
 
   @@index([storeId])
   @@index([fileSha256])
@@ -175,11 +192,15 @@ model Order {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
+  isBurnOrder    Boolean         @default(false)
+  burnNftId      String?
+
   store          Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
   provider       Provider?       @relation(fields: [providerId], references: [id], onDelete: SetNull)
   items          OrderItem[]
   escrows        Escrow[]
   providerOrders ProviderOrder[]
+  nfts           NftToken[]
 
   @@unique([storeId, shopifyOrderId])
   @@index([storeId])
@@ -198,6 +219,7 @@ model OrderItem {
 
   order  Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   design Design? @relation(fields: [designId], references: [id], onDelete: SetNull)
+  nft    NftToken?
 
   @@index([orderId])
 }
@@ -300,12 +322,15 @@ model MerchantProduct {
   printConfig        Json      // { printArea, x, y, scale, rotation }
   status             String    @default("draft") // draft, publishing, published, error
   publishedAt        DateTime?
+  isBurnToClaim      Boolean   @default(false)
+  maxSupply          Int?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
   store              Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
   design             Design    @relation(fields: [designId], references: [id])
   providerProduct    ProviderProduct @relation(fields: [providerProductId], references: [id])
+  nfts               NftToken[]
 
   @@index([storeId])
   @@index([shopifyProductId])
@@ -558,4 +583,74 @@ model NotificationSession {
   @@index([token, expiresAt])
   @@index([expiresAt])
   @@map("notification_sessions")
+}
+
+// ─── Digital Twin NFT ───────────────────────────────────────────────
+
+model StoreIssuer {
+  id                 String    @id @default(uuid())
+  storeId            String    @unique
+  store              Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  stellarPublicKey   String    @unique
+  encryptedSecretKey String
+  fundedAt           DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@map("store_issuers")
+}
+
+model BuyerWallet {
+  id                 String    @id @default(uuid())
+  email              String    @unique
+  stellarPublicKey   String    @unique
+  encryptedSecretKey String
+  fundedAt           DateTime?
+  claimedAt          DateTime?
+  claimWalletAddress String?
+  nfts               NftToken[]
+  createdAt          DateTime  @default(now())
+
+  @@map("buyer_wallets")
+}
+
+model NftToken {
+  id                String          @id @default(uuid())
+  orderId           String
+  order             Order           @relation(fields: [orderId], references: [id])
+  orderItemId       String          @unique
+  orderItem         OrderItem       @relation(fields: [orderItemId], references: [id])
+  merchantProductId String
+  merchantProduct   MerchantProduct @relation(fields: [merchantProductId], references: [id])
+  designId          String
+  design            Design          @relation(fields: [designId], references: [id])
+  storeId           String
+  store             Store           @relation(fields: [storeId], references: [id])
+
+  assetCode         String
+  issuerPublicKey   String
+  ownerWalletId     String?
+  ownerWallet       BuyerWallet?    @relation(fields: [ownerWalletId], references: [id])
+
+  metadataUrl       String
+  metadataHash      String
+
+  mintTxHash        String?
+  mintLedger        Int?
+  burnTxHash        String?
+  deliveryTxHash    String?
+
+  status            NftStatus       @default(MINTING)
+  physicalStatus    PhysicalStatus?
+  serialNumber      Int             @unique @default(autoincrement())
+  burnedAt          DateTime?
+  burnOrderId       String?
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([storeId])
+  @@index([orderId])
+  @@index([merchantProductId])
+  @@index([ownerWalletId])
+  @@map("nft_tokens")
 }

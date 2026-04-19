@@ -531,6 +531,366 @@ export class StellarService implements OnModuleInit {
     });
   }
 
+  // ─── NFT OPERATIONS ─────────────────────────
+
+  /**
+   * Create a new Stellar account to act as NFT issuer for a store.
+   * Funds the account from SYSTEM and sets AUTH_REQUIRED + AUTH_REVOCABLE +
+   * AUTH_CLAWBACK_ENABLED flags so NFTs can be minted with clawback control.
+   */
+  async createStoreIssuer(
+    storeId: string,
+  ): Promise<{ publicKey: string; secretKey: string }> {
+    if (!this.systemKeypair) {
+      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    }
+
+    const issuerKeypair = StellarSdk.Keypair.random();
+    this.logger.log(
+      `Creating store issuer for store=${storeId}, pubkey=${issuerKeypair.publicKey()}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const systemAccount = await this.server.loadAccount(
+        this.systemKeypair!.publicKey(),
+      );
+
+      // Fund the new account and set issuer flags in an atomic tx
+      const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.createAccount({
+            destination: issuerKeypair.publicKey(),
+            startingBalance: '2.5',
+          }),
+        )
+        .addOperation(
+          StellarSdk.Operation.setOptions({
+            setFlags:
+              (StellarSdk.AuthRequiredFlag |
+                StellarSdk.AuthRevocableFlag |
+                StellarSdk.AuthClawbackEnabledFlag) as StellarSdk.AuthFlag,
+            source: issuerKeypair.publicKey(),
+          }),
+        )
+        .addMemo(StellarSdk.Memo.text(`issuer:${storeId.slice(0, 21)}`))
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(this.systemKeypair!);
+      transaction.sign(issuerKeypair);
+
+      const result = await this.submitWithFeeBump(
+        transaction,
+        this.systemKeypair!,
+      );
+
+      this.logger.log(
+        `Store issuer created: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return {
+        publicKey: issuerKeypair.publicKey(),
+        secretKey: issuerKeypair.secret(),
+      };
+    });
+  }
+
+  /**
+   * Mint an NFT asset to a buyer. Atomic transaction with 4 ops:
+   *   1. changeTrust — buyer trusts the asset (buyer as source)
+   *   2. setTrustLineFlags — authorize the trustline
+   *   3. payment — send 1 unit from issuer to buyer
+   *   4. manageData — store metadata hash on the issuer account
+   */
+  async mintNftAsset(
+    issuerKeypair: StellarSdk.Keypair,
+    buyerKeypair: StellarSdk.Keypair,
+    assetCode: string,
+    metadataHash: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Minting NFT: asset=${assetCode}, issuer=${issuerKeypair.publicKey()}, buyer=${buyerKeypair.publicKey()}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const issuerAccount = await this.server.loadAccount(
+        issuerKeypair.publicKey(),
+      );
+      const nftAsset = new StellarSdk.Asset(assetCode, issuerKeypair.publicKey());
+
+      const transaction = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        // 1. Buyer establishes trustline
+        .addOperation(
+          StellarSdk.Operation.changeTrust({
+            asset: nftAsset,
+            limit: '1',
+            source: buyerKeypair.publicKey(),
+          }),
+        )
+        // 2. Issuer authorizes the trustline
+        .addOperation(
+          StellarSdk.Operation.setTrustLineFlags({
+            trustor: buyerKeypair.publicKey(),
+            asset: nftAsset,
+            flags: { authorized: true },
+          }),
+        )
+        // 3. Send 1 unit of the NFT asset
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: buyerKeypair.publicKey(),
+            asset: nftAsset,
+            amount: '1',
+          }),
+        )
+        // 4. Store metadata hash
+        .addOperation(
+          StellarSdk.Operation.manageData({
+            name: `nft:${assetCode}`,
+            value: metadataHash,
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(issuerKeypair);
+      transaction.sign(buyerKeypair);
+
+      const result = await this.submitWithFeeBump(transaction, issuerKeypair);
+
+      this.logger.log(
+        `NFT minted: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
+   * Clawback 1 unit of an NFT asset from a buyer.
+   */
+  async clawbackNftAsset(
+    issuerKeypair: StellarSdk.Keypair,
+    buyerPublicKey: string,
+    assetCode: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Clawback NFT: asset=${assetCode}, from=${buyerPublicKey}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const issuerAccount = await this.server.loadAccount(
+        issuerKeypair.publicKey(),
+      );
+      const nftAsset = new StellarSdk.Asset(assetCode, issuerKeypair.publicKey());
+
+      const transaction = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.clawback({
+            asset: nftAsset,
+            amount: '1',
+            from: buyerPublicKey,
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(issuerKeypair);
+
+      const result = await this.submitWithFeeBump(transaction, issuerKeypair);
+
+      this.logger.log(
+        `NFT clawback: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
+   * Transfer 1 unit of an NFT asset from one holder to another.
+   */
+  async transferNftAsset(
+    fromKeypair: StellarSdk.Keypair,
+    toPublicKey: string,
+    issuerPublicKey: string,
+    assetCode: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Transfer NFT: asset=${assetCode}, from=${fromKeypair.publicKey()}, to=${toPublicKey}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const fromAccount = await this.server.loadAccount(
+        fromKeypair.publicKey(),
+      );
+      const nftAsset = new StellarSdk.Asset(assetCode, issuerPublicKey);
+
+      const transaction = new StellarSdk.TransactionBuilder(fromAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: toPublicKey,
+            asset: nftAsset,
+            amount: '1',
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(fromKeypair);
+
+      const result = await this.submitWithFeeBump(transaction, fromKeypair);
+
+      this.logger.log(
+        `NFT transferred: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
+   * Clear the clawback flag on a trustline, making the NFT non-clawbackable.
+   */
+  async clearClawbackFlag(
+    issuerKeypair: StellarSdk.Keypair,
+    trustorPublicKey: string,
+    assetCode: string,
+  ): Promise<void> {
+    this.logger.log(
+      `Clear clawback flag: asset=${assetCode}, trustor=${trustorPublicKey}`,
+    );
+
+    await this.withStellarLock(async () => {
+      const issuerAccount = await this.server.loadAccount(
+        issuerKeypair.publicKey(),
+      );
+      const nftAsset = new StellarSdk.Asset(assetCode, issuerKeypair.publicKey());
+
+      const transaction = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.setTrustLineFlags({
+            trustor: trustorPublicKey,
+            asset: nftAsset,
+            flags: { clawbackEnabled: false },
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(issuerKeypair);
+
+      const result = await this.submitWithFeeBump(transaction, issuerKeypair);
+
+      this.logger.log(
+        `Clawback flag cleared: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+    });
+  }
+
+  /**
+   * Fund a new Stellar account from the SYSTEM account.
+   */
+  async fundAccount(
+    destination: string,
+    amount: string,
+  ): Promise<string> {
+    if (!this.systemKeypair) {
+      throw new Error('SYSTEM_STELLAR_SECRET_KEY not configured');
+    }
+
+    this.logger.log(
+      `Funding account: destination=${destination}, amount=${amount}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const systemAccount = await this.server.loadAccount(
+        this.systemKeypair!.publicKey(),
+      );
+
+      const transaction = new StellarSdk.TransactionBuilder(systemAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.createAccount({
+            destination,
+            startingBalance: amount,
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(this.systemKeypair!);
+
+      const result = await this.submitWithFeeBump(
+        transaction,
+        this.systemKeypair!,
+      );
+
+      this.logger.log(`Account funded: hash=${result.hash}`);
+
+      return result.hash;
+    });
+  }
+
+  /**
+   * Update or create a manageData entry on the issuer account.
+   */
+  async updateManageData(
+    issuerKeypair: StellarSdk.Keypair,
+    key: string,
+    value: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    this.logger.log(
+      `Update manageData: key=${key}, issuer=${issuerKeypair.publicKey()}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const issuerAccount = await this.server.loadAccount(
+        issuerKeypair.publicKey(),
+      );
+
+      const transaction = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.manageData({
+            name: key,
+            value,
+          }),
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(issuerKeypair);
+
+      const result = await this.submitWithFeeBump(transaction, issuerKeypair);
+
+      this.logger.log(
+        `ManageData updated: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
   // ─── PRIVATE HELPERS ────────────────────────
 
   private getUsdcAsset(): StellarSdk.Asset {

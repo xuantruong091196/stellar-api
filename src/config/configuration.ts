@@ -87,6 +87,14 @@ export default () => ({
     jwtExpiresIn: process.env.PROVIDER_JWT_EXPIRES_IN || '24h',
   },
 
+  nft: {
+    systemXlmWarnThreshold: parseInt(process.env.SYSTEM_XLM_WARN_THRESHOLD || '500', 10),
+    systemXlmCriticalThreshold: parseInt(process.env.SYSTEM_XLM_CRITICAL_THRESHOLD || '200', 10),
+    issuerFundXlm: '5',
+    buyerFundXlm: '2',
+    adminEmail: process.env.ADMIN_EMAIL || 'admin@stelo.life',
+  },
+
   aws: {
     s3Bucket: process.env.R2_BUCKET || process.env.AWS_S3_BUCKET,
     r2AccountId: process.env.R2_ACCOUNT_ID,

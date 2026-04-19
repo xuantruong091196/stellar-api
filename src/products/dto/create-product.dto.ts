@@ -2,6 +2,8 @@ import {
   IsString,
   IsNumber,
   IsOptional,
+  IsBoolean,
+  IsInt,
   Min,
   Max,
   MinLength,
@@ -86,4 +88,13 @@ export class CreateProductDto {
   @IsString()
   @MaxLength(10_000_000)
   mockupDataUrl?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isBurnToClaim?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  maxSupply?: number;
 }

@@ -92,6 +92,8 @@ export class ProductsService {
         baseCost,
         profitMargin: Math.round(profitMargin * 100) / 100,
         printConfig: dto.printConfig as any,
+        isBurnToClaim: dto.isBurnToClaim || false,
+        maxSupply: dto.maxSupply || null,
         status: 'draft',
       },
     });

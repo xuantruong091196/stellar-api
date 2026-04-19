@@ -29,10 +29,10 @@ export class SystemBalanceMonitor {
   @Cron(CronExpression.EVERY_5_MINUTES)
   async checkBalance() {
     try {
-      const systemPublicKey = this.stellar['systemKeypair']?.publicKey?.();
+      const systemPublicKey = this.stellar.getSystemPublicKey();
       if (!systemPublicKey) return;
 
-      const balance = await this.stellar.getAccountBalance(systemPublicKey);
+      const balance = await this.stellar.getXlmBalance(systemPublicKey);
       if (balance === null || balance === undefined) return;
 
       if (balance < this.criticalThreshold) {

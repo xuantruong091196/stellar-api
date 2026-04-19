@@ -29,6 +29,7 @@ import { SettingsModule } from './settings/settings.module';
 import { NotificationsCleanupModule } from './notifications-cleanup/notifications-cleanup.module';
 import { NftModule } from './nft/nft.module';
 import { BuyerModule } from './buyer/buyer.module';
+import { SystemMonitorModule } from './system-monitor/system-monitor.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { BuyerModule } from './buyer/buyer.module';
     NotificationsCleanupModule,
     NftModule,
     BuyerModule,
+    SystemMonitorModule,
   ],
   providers: [
     {

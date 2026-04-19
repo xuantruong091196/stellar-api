@@ -4,10 +4,11 @@ import { NftController } from './nft.controller';
 import { NftMetadataService } from './nft-metadata.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StellarModule } from '../stellar/stellar.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { S3Service } from '../common/services/s3.service';
 
 @Module({
-  imports: [PrismaModule, StellarModule],
+  imports: [PrismaModule, StellarModule, NotificationsModule],
   controllers: [NftController],
   providers: [NftService, NftMetadataService, S3Service],
   exports: [NftService],

@@ -3,6 +3,7 @@ import * as StellarSdk from '@stellar/stellar-sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { NftMetadataService } from './nft-metadata.service';
+import { EmailService } from '../notifications/email.service';
 import { ConfigService } from '@nestjs/config';
 import { encrypt, decrypt } from '../common/crypto.util';
 import { NftStatus } from '../../generated/prisma';
@@ -16,6 +17,7 @@ export class NftService {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly metadata: NftMetadataService,
+    private readonly emailService: EmailService,
     private readonly config: ConfigService,
   ) {
     this.encryptionKey = this.config.get<string>('encryption.key')!;
@@ -125,6 +127,15 @@ export class NftService {
         data: { assetCode, metadataUrl, metadataHash },
       });
 
+      // Send minting-started email
+      this.emailService.send({
+        to: order.customerEmail,
+        type: 'nft.minting',
+        locale: 'en',
+        title: `NFT minting in progress — ${assetCode}`,
+        payload: { assetCode, orderId: order.id },
+      }).catch((err) => this.logger.warn(`nft.minting email failed: ${(err as Error).message}`));
+
       // Mint on Stellar
       try {
         const issuerKeypair = StellarSdk.Keypair.fromSecret(
@@ -147,12 +158,30 @@ export class NftService {
         });
 
         this.logger.log(`NFT ${assetCode} minted for order ${order.id} (tx: ${txHash})`);
+
+        // Send mint-ready email
+        this.emailService.send({
+          to: order.customerEmail,
+          type: 'nft.ready',
+          locale: 'en',
+          title: `Your NFT is ready — ${assetCode}`,
+          payload: { assetCode, mintTxHash: txHash, nftId: nft.id, orderId: order.id },
+        }).catch((err) => this.logger.warn(`nft.ready email failed: ${(err as Error).message}`));
       } catch (err) {
         this.logger.error(`NFT mint failed for ${assetCode}: ${(err as Error).message}`);
         await this.prisma.nftToken.update({
           where: { id: nft.id },
           data: { status: NftStatus.MINT_FAILED },
         });
+
+        // Send mint-failed email
+        this.emailService.send({
+          to: order.customerEmail,
+          type: 'nft.mint_failed',
+          locale: 'en',
+          title: `NFT minting failed — ${assetCode}`,
+          payload: { assetCode, error: (err as Error).message, orderId: order.id },
+        }).catch((e) => this.logger.warn(`nft.mint_failed email failed: ${(e as Error).message}`));
       }
     }
   }
@@ -276,6 +305,76 @@ export class NftService {
 
     this.logger.log(`NFT ${nft.assetCode} burned for claim (tx: ${txHash})`);
     return nft;
+  }
+
+  /**
+   * Create a fulfillment order after an NFT is burned for physical claim.
+   * Creates an Order + ProviderOrder so the provider can ship the item.
+   */
+  async createFulfillmentFromBurn(
+    nftId: string,
+    customerEmail: string,
+    shippingAddress: { name: string; street: string; city: string; state?: string; zip: string; country: string },
+  ) {
+    const nft = await this.prisma.nftToken.findUnique({
+      where: { id: nftId },
+      include: {
+        merchantProduct: { include: { providerProduct: true } },
+        store: true,
+      },
+    });
+    if (!nft) throw new NotFoundException('NFT not found');
+
+    const platformFeeRate = this.config.get<number>('pricing.platformFeeRate') ?? 0.05;
+    const retailPrice = nft.merchantProduct.retailPrice;
+    const baseCost = nft.merchantProduct.baseCost;
+    const platformFee = Math.round(retailPrice * platformFeeRate * 100) / 100;
+    const providerPay = Math.round(baseCost * 100) / 100;
+
+    const order = await this.prisma.order.create({
+      data: {
+        storeId: nft.storeId,
+        shopifyOrderId: `burn-${nft.id}`,
+        shopifyOrderNumber: `BURN-${nft.serialNumber}`,
+        status: 'PENDING',
+        customerName: shippingAddress.name,
+        shippingAddress: {
+          name: shippingAddress.name,
+          address1: shippingAddress.street,
+          city: shippingAddress.city,
+          province: shippingAddress.state || '',
+          zip: shippingAddress.zip,
+          country: shippingAddress.country,
+        },
+        subtotalUsdc: retailPrice,
+        platformFeeUsdc: platformFee,
+        providerPayUsdc: providerPay,
+        totalUsdc: retailPrice,
+        isBurnOrder: true,
+        burnNftId: nft.id,
+      },
+    });
+
+    // Update NftToken with burnOrderId
+    await this.prisma.nftToken.update({
+      where: { id: nftId },
+      data: { burnOrderId: order.id },
+    });
+
+    // Create ProviderOrder for fulfillment
+    const providerId = nft.merchantProduct.providerProduct.providerId;
+    await this.prisma.providerOrder.create({
+      data: {
+        orderId: order.id,
+        providerId,
+        totalBaseCost: baseCost,
+        platformFee,
+        status: 'pending',
+      },
+    });
+
+    this.logger.log(`Burn fulfillment order created: ${order.id} for NFT ${nft.assetCode}`);
+    return order;
   }
 
   async getVerificationData(nftId: string) {

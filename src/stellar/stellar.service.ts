@@ -467,6 +467,24 @@ export class StellarService implements OnModuleInit {
     throw lastError;
   }
 
+  /** Get native XLM balance for a Stellar address. */
+  async getXlmBalance(address: string): Promise<number | null> {
+    try {
+      const account = await this.server.loadAccount(address);
+      const nativeBalance = account.balances.find(
+        (b: any) => b.asset_type === 'native',
+      );
+      return nativeBalance ? parseFloat(nativeBalance.balance) : 0;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Public key of the SYSTEM account. */
+  getSystemPublicKey(): string | null {
+    return this.systemKeypair?.publicKey() || null;
+  }
+
   /** Get USDC balance for a Stellar address. */
   async getAccountBalance(address: string): Promise<number> {
     const account = await this.server.loadAccount(address);
@@ -563,7 +581,7 @@ export class StellarService implements OnModuleInit {
         .addOperation(
           StellarSdk.Operation.createAccount({
             destination: issuerKeypair.publicKey(),
-            startingBalance: '2.5',
+            startingBalance: '5',
           }),
         )
         .addOperation(

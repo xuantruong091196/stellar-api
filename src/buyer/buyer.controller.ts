@@ -68,7 +68,17 @@ export class BuyerController {
   ) {
     const email = this.buyerService.extractEmailFromJwt(authHeader);
     const nft = await this.nftService.burnForClaim(nftId, email);
-    // dto contains shipping address — could be stored or emitted as event
-    return { success: true, assetCode: nft.assetCode };
+
+    // Create fulfillment order so the physical product gets shipped
+    const order = await this.nftService.createFulfillmentFromBurn(nftId, email, {
+      name: dto.name,
+      street: dto.street,
+      city: dto.city,
+      state: dto.state,
+      zip: dto.zip,
+      country: dto.country,
+    });
+
+    return { success: true, assetCode: nft.assetCode, orderId: order.id };
   }
 }

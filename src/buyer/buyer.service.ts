@@ -106,7 +106,7 @@ export class BuyerService implements OnModuleInit {
     await this.redis.del(redisKey);
 
     const accessToken = jwt.sign({ email }, this.jwtSecret, {
-      expiresIn: '7d',
+      expiresIn: '24h',
     });
 
     this.logger.log(`Magic link verified for ${email}`);

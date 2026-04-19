@@ -139,4 +139,35 @@ export class EmailService implements OnModuleInit {
       throw err;
     }
   }
+
+  /**
+   * Send a raw email without template rendering or rate limiting.
+   * Used for system-level alerts (e.g. low balance warnings).
+   */
+  async sendRaw(input: {
+    to: string;
+    subject: string;
+    html: string;
+  }): Promise<{ sent: boolean; reason?: string }> {
+    if (!this.resend) {
+      this.logger.log(`[DRY RUN] Raw email to ${input.to}: ${input.subject}`);
+      return { sent: false, reason: 'resend_not_configured' };
+    }
+
+    try {
+      await this.resend.emails.send({
+        from: this.fromEmail,
+        to: input.to,
+        replyTo: this.replyTo,
+        subject: input.subject,
+        html: input.html,
+      });
+
+      this.logger.log(`Raw email sent to ${input.to}: ${input.subject}`);
+      return { sent: true };
+    } catch (err) {
+      this.logger.error(`Failed to send raw email to ${input.to}: ${(err as Error).message}`);
+      throw err;
+    }
+  }
 }

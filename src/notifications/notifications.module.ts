@@ -15,6 +15,6 @@ import { EmailTemplatesService } from './email-templates.service';
     EmailService,
     EmailTemplatesService,
   ],
-  exports: [NotificationsService],
+  exports: [NotificationsService, EmailService],
 })
 export class NotificationsModule {}

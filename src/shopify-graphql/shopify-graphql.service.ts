@@ -32,7 +32,7 @@ export class ShopifyGraphqlService {
     gql: string,
     variables?: Record<string, unknown>,
   ): Promise<T> {
-    const apiVersion = '2024-10';
+    const apiVersion = '2024-01';
     const url = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
 
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -160,7 +160,11 @@ export class ShopifyGraphqlService {
   // ─── PRODUCT OPERATIONS ───────────────────────
 
   /**
-   * Create a product with variants and media on Shopify.
+   * Create a product on Shopify (2024-01 schema).
+   *
+   * Shopify API 2024-01+ changed `productCreate` to accept `ProductInput`
+   * (not `ProductCreateInput`). Variants are NO LONGER part of the create
+   * call; use `productVariantsBulkCreate` after this.
    */
   async productCreate(
     shopDomain: string,
@@ -171,25 +175,20 @@ export class ShopifyGraphqlService {
       productType?: string;
       vendor?: string;
       tags?: string[];
-      options?: Array<{ name: string; values: Array<{ name: string }> }>;
-      variants?: Array<{
-        optionValues: Array<{ optionName: string; name: string }>;
-        price: string;
-        sku?: string;
-      }>;
+      productOptions?: Array<{ name: string; values: Array<{ name: string }> }>;
       metafields?: Array<{ namespace: string; key: string; value: string; type: string }>;
     },
     mediaResourceUrls?: string[],
   ): Promise<{ productId: string; variantIds: string[] }> {
     const mutation = `
-      mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
-        productCreate(product: $product, media: $media) {
+      mutation productCreate($input: ProductInput!, $media: [CreateMediaInput!]) {
+        productCreate(input: $input, media: $media) {
           product {
             id
             handle
-            variants(first: 100) {
+            variants(first: 10) {
               edges {
-                node { id title price sku }
+                node { id title }
               }
             }
           }
@@ -208,11 +207,11 @@ export class ShopifyGraphqlService {
         product: {
           id: string;
           handle: string;
-          variants: { edges: Array<{ node: { id: string; title: string; price: string; sku: string } }> };
+          variants: { edges: Array<{ node: { id: string; title: string } }> };
         } | null;
         userErrors: UserError[];
       };
-    }>(shopDomain, accessToken, mutation, { product: input, media });
+    }>(shopDomain, accessToken, mutation, { input, media });
 
     if (result.productCreate.userErrors.length > 0) {
       throw new Error(
@@ -229,6 +228,104 @@ export class ShopifyGraphqlService {
       productId: product.id,
       variantIds: product.variants.edges.map((e) => e.node.id),
     };
+  }
+
+  /**
+   * Bulk-create variants on an existing product (2024-01+).
+   * Called after `productCreate` since that mutation no longer accepts
+   * inline variants.
+   */
+  async productVariantsBulkCreate(
+    shopDomain: string,
+    accessToken: string,
+    productId: string,
+    variants: Array<{
+      optionValues: Array<{ optionName: string; name: string }>;
+      price: string;
+      sku?: string;
+    }>,
+  ): Promise<string[]> {
+    if (variants.length === 0) return [];
+
+    const mutation = `
+      mutation productVariantsBulkCreate(
+        $productId: ID!,
+        $variants: [ProductVariantsBulkInput!]!
+      ) {
+        productVariantsBulkCreate(
+          productId: $productId,
+          strategy: DEFAULT,
+          variants: $variants
+        ) {
+          productVariants { id title sku }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const bulkVariants = variants.map((v) => ({
+      optionValues: v.optionValues,
+      price: v.price,
+      ...(v.sku ? { barcode: v.sku } : {}),
+    }));
+
+    const result = await this.query<{
+      productVariantsBulkCreate: {
+        productVariants: Array<{ id: string; title: string; sku: string }>;
+        userErrors: UserError[];
+      };
+    }>(shopDomain, accessToken, mutation, {
+      productId,
+      variants: bulkVariants,
+    });
+
+    if (result.productVariantsBulkCreate.userErrors.length > 0) {
+      throw new Error(
+        `Variant bulk create failed: ${result.productVariantsBulkCreate.userErrors.map((e) => `${e.field?.join('.') || '?'}: ${e.message}`).join(', ')}`,
+      );
+    }
+
+    return result.productVariantsBulkCreate.productVariants.map((v) => v.id);
+  }
+
+  /**
+   * Bulk-update existing variants (set price, SKU, etc.) on a product.
+   */
+  async productVariantsBulkUpdate(
+    shopDomain: string,
+    accessToken: string,
+    productId: string,
+    variants: Array<{ id: string; price?: string; sku?: string }>,
+  ): Promise<void> {
+    if (variants.length === 0) return;
+
+    const mutation = `
+      mutation productVariantsBulkUpdate(
+        $productId: ID!,
+        $variants: [ProductVariantsBulkInput!]!
+      ) {
+        productVariantsBulkUpdate(
+          productId: $productId,
+          variants: $variants
+        ) {
+          productVariants { id }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const result = await this.query<{
+      productVariantsBulkUpdate: {
+        productVariants: Array<{ id: string }>;
+        userErrors: UserError[];
+      };
+    }>(shopDomain, accessToken, mutation, { productId, variants });
+
+    if (result.productVariantsBulkUpdate.userErrors.length > 0) {
+      throw new Error(
+        `Variant bulk update failed: ${result.productVariantsBulkUpdate.userErrors.map((e) => `${e.field?.join('.') || '?'}: ${e.message}`).join(', ')}`,
+      );
+    }
   }
 
   /**

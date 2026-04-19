@@ -150,6 +150,7 @@ model Mockup {
 
   design Design @relation(fields: [designId], references: [id], onDelete: Cascade)
 
+  @@unique([designId, productType, variant])
   @@index([designId])
 }
 

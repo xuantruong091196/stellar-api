@@ -80,4 +80,10 @@ export class CreateProductDto {
   @ValidateNested()
   @Type(() => PrintConfigDto)
   printConfig: PrintConfigDto;
+
+  @ApiPropertyOptional({ description: 'Editor-exported mockup image as data URL (WYSIWYG)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10_000_000)
+  mockupDataUrl?: string;
 }

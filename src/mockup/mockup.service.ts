@@ -260,6 +260,7 @@ export class MockupService {
     blankImages: Record<string, string>;
     printConfig: { printArea: string; x: number; y: number; scale: number; rotation: number };
     productType: string;
+    printAreaPx?: { widthPx: number; heightPx: number };
   }): Promise<Array<{ color: string; imageUrl: string }>> {
     const results: Array<{ color: string; imageUrl: string }> = [];
 
@@ -296,6 +297,7 @@ export class MockupService {
           blankUrl,
           input.printConfig,
           designMeta,
+          input.printAreaPx,
         );
 
         const key = `mockups/${input.designId}/${input.productType}-${sanitizeColor(color)}.jpg`;
@@ -323,35 +325,84 @@ export class MockupService {
   }
 
   /**
-   * Composite a design image onto an actual blank product photo.
-   * Uses print config to determine position + scale.
+   * Upload an editor-exported mockup (base64 data URL) to R2.
+   * Returns the public URL. Used by createDraft to persist the
+   * WYSIWYG composite the merchant saw in the editor.
+   */
+  async uploadEditorExport(
+    designId: string,
+    productType: string,
+    dataUrl: string,
+  ): Promise<string> {
+    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
+    if (!match) throw new Error('Invalid data URL format');
+
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const buffer = Buffer.from(match[2], 'base64');
+
+    const optimized = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
+
+    const key = `mockups/${designId}/${productType}-editor-export.jpg`;
+    const imageUrl = await this.uploadToR2(key, optimized);
+
+    await this.prisma.mockup.upsert({
+      where: {
+        designId_productType_variant: {
+          designId,
+          productType,
+          variant: 'editor-export',
+        },
+      },
+      update: { imageUrl },
+      create: {
+        designId,
+        productType,
+        variant: 'editor-export',
+        imageUrl,
+      },
+    });
+
+    this.logger.log(`Editor export saved for design ${designId}`);
+    return imageUrl;
+  }
+
+  /**
+   * Composite a design onto a blank product photo with visual improvements:
+   * - Auto-trim transparent padding from design
+   * - Drop shadow beneath design for depth
+   * - Multiply blend for fabric texture absorption
    */
   private async compositeDesignOnBlank(
     designBuffer: Buffer,
     blankUrl: string,
     printConfig: { x: number; y: number; scale: number; rotation: number },
     designMeta: sharp.Metadata,
+    _printAreaPx?: { widthPx: number; heightPx: number },
   ): Promise<Buffer> {
-    // Fetch blank product image (size-capped, redirect-blocked, timeout)
     const blankBuffer = await safeImageFetch(blankUrl);
 
-    // Get blank dimensions
     const blankMeta = await sharp(blankBuffer).metadata();
     const blankWidth = blankMeta.width || 1200;
     const blankHeight = blankMeta.height || 1200;
 
-    // Calculate design placement — center of blank by default
-    // Design takes ~35% of blank width (typical for print areas)
-    const targetWidth = Math.round(blankWidth * 0.35 * (printConfig.scale || 1));
-    const aspectRatio = (designMeta.height || 1) / (designMeta.width || 1);
+    // Auto-trim transparent padding so design fills its space
+    let trimmedDesign: Buffer;
+    try {
+      trimmedDesign = await sharp(designBuffer).trim().toBuffer();
+    } catch {
+      trimmedDesign = designBuffer;
+    }
+    const trimmedMeta = await sharp(trimmedDesign).metadata();
+
+    const printAreaOnBlank = blankWidth * 0.45;
+    const targetWidth = Math.round(printAreaOnBlank * Math.min(printConfig.scale || 0.6, 1));
+    const aspectRatio = (trimmedMeta.height || 1) / (trimmedMeta.width || 1);
     const targetHeight = Math.round(targetWidth * aspectRatio);
 
-    // Center position + offset from printConfig
-    const centerX = Math.round(blankWidth / 2 - targetWidth / 2 + (printConfig.x || 0));
-    const centerY = Math.round(blankHeight * 0.35 - targetHeight / 2 + (printConfig.y || 0));
+    const left = Math.round((blankWidth - targetWidth) / 2);
+    const top = Math.round(blankHeight * 0.25);
 
-    // Resize design with rotation if needed
-    let resizedDesign = sharp(designBuffer).resize(targetWidth, targetHeight, {
+    let resizedDesign = sharp(trimmedDesign).resize(targetWidth, targetHeight, {
       fit: 'contain',
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     });
@@ -364,13 +415,39 @@ export class MockupService {
 
     const designPng = await resizedDesign.png().toBuffer();
 
-    // Composite onto blank
+    // Create drop shadow: black silhouette + blur + reduced opacity
+    const shadowPng = await sharp(designPng)
+      .ensureAlpha()
+      .composite([{
+        input: Buffer.from(
+          `<svg width="${targetWidth}" height="${targetHeight}">
+            <rect width="100%" height="100%" fill="black" opacity="0.25"/>
+          </svg>`,
+        ),
+        blend: 'in',
+      }])
+      .blur(8)
+      .toBuffer();
+
+    // Composite: blank → shadow (offset +4px down) → design (multiply at 20% + over at 80%)
+    const designMultiply = await sharp(designPng)
+      .ensureAlpha()
+      .linear(0.85, 0)
+      .toBuffer();
+
     return sharp(blankBuffer)
       .composite([
         {
-          input: designPng,
-          left: Math.max(0, centerX),
-          top: Math.max(0, centerY),
+          input: shadowPng,
+          left: Math.max(0, left),
+          top: Math.max(0, top + 4),
+          blend: 'over',
+        },
+        {
+          input: designMultiply,
+          left: Math.max(0, left),
+          top: Math.max(0, top),
+          blend: 'over',
         },
       ])
       .jpeg({ quality: 90 })

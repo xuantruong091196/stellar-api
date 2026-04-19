@@ -100,28 +100,20 @@ export class ProductsService {
       `Draft product created: ${product.id} (${dto.title}), margin: $${profitMargin.toFixed(2)}`,
     );
 
-    // Generate composite mockups async (fire and forget — don't block response)
-    if (design.fileUrl && providerProduct.blankImages) {
-      const blanks = providerProduct.blankImages as Record<string, string>;
-      if (Object.keys(blanks).length > 0) {
-        this.mockupService
-          .generateProductMockups({
-            designId: design.id,
-            designUrl: design.fileUrl,
-            blankImages: blanks,
-            printConfig: dto.printConfig,
-            productType: providerProduct.productType,
-          })
-          .then((mockups) => {
-            this.logger.log(
-              `Generated ${mockups.length} mockups for product ${product.id}`,
-            );
-          })
-          .catch((err) => {
-            this.logger.error(
-              `Mockup generation failed for product ${product.id}: ${(err as Error).message}`,
-            );
-          });
+    // Save editor-export mockup if provided (WYSIWYG — highest quality).
+    // Await so the mockup is ready before merchant tries to publish.
+    if (dto.mockupDataUrl) {
+      try {
+        await this.mockupService.uploadEditorExport(
+          design.id,
+          providerProduct.productType,
+          dto.mockupDataUrl,
+        );
+        this.logger.log(`Editor export saved for product ${product.id}`);
+      } catch (err) {
+        this.logger.warn(
+          `Editor export upload failed for ${product.id}: ${(err as Error).message}`,
+        );
       }
     }
 
@@ -232,66 +224,38 @@ export class ProductsService {
     });
 
     try {
-      // 2. Generate composite mockups and upload them to Shopify via staged uploads
+      // 2. Collect product images for Shopify.
+      // Priority: editor-export mockup → design image → blank product photo.
+      // Server-side composite is disabled — Printful catalog photos are
+      // model/lifestyle shots where overlay produces unusable results.
       const mediaUrls: string[] = [];
       try {
-        const blanks = product.providerProduct.blankImages as Record<string, string> | null;
-        const printCfg = product.printConfig as { printArea: string; x: number; y: number; scale: number; rotation: number } | null;
-
-        if (product.design.fileUrl && blanks && Object.keys(blanks).length > 0 && printCfg) {
-          // Generate per-color mockups (composites design onto blank product photos)
-          const mockups = await this.mockupService.generateProductMockups({
+        // 2a. Check for editor-export mockup (WYSIWYG from Fabric.js canvas)
+        const editorExport = await this.prisma.mockup.findFirst({
+          where: {
             designId: product.designId,
-            designUrl: product.design.fileUrl,
-            blankImages: blanks,
-            printConfig: printCfg,
-            productType: product.providerProduct.productType,
-          });
+            variant: 'editor-export',
+          },
+        });
 
-          if (mockups.length > 0) {
-            // Create staged upload targets on Shopify (one per mockup)
-            const stagedTargets = await this.shopifyGql.stagedUploadsCreate(
-              store.shopifyDomain,
-              accessToken,
-              mockups.map((m, i) => ({
-                filename: `mockup-${m.color.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i}.jpg`,
-                mimeType: 'image/jpeg' as const,
-                resource: 'IMAGE' as const,
-              })),
-            );
-
-            // Upload each mockup to its staged target then collect the Shopify CDN URL
-            await Promise.all(
-              mockups.map(async (mockup, i) => {
-                const target = stagedTargets[i];
-                if (!target) return;
-
-                let buffer: Buffer;
-                try {
-                  // safeImageFetch: 16MB cap, redirect: manual, 15s timeout,
-                  // content-type=image/* validation.
-                  buffer = await safeImageFetch(mockup.imageUrl);
-                } catch (err) {
-                  this.logger.warn(
-                    `Could not fetch R2 mockup for color ${mockup.color}: ${(err as Error).message}`,
-                  );
-                  return;
-                }
-
-                await this.shopifyGql.uploadToStagedTarget(
-                  target,
-                  buffer,
-                  `mockup-${mockup.color.toLowerCase().replace(/[^a-z0-9]/g, '-')}.jpg`,
-                  'image/jpeg',
-                );
-
-                mediaUrls.push(target.resourceUrl);
-              }),
-            );
-
-            this.logger.log(`Uploaded ${mediaUrls.length}/${mockups.length} mockup images to Shopify for product ${merchantProductId}`);
-          }
+        if (editorExport?.imageUrl) {
+          mediaUrls.push(editorExport.imageUrl);
+          this.logger.log(
+            `Using editor-export mockup for ${merchantProductId}`,
+          );
         }
+
+        // 2b. Use the design image itself — clean, shows the artwork
+        if (mediaUrls.length === 0 && product.design.fileUrl) {
+          mediaUrls.push(product.design.fileUrl);
+          this.logger.log(
+            `Using design image for ${merchantProductId}`,
+          );
+        }
+
+        // Server-side composite disabled — Printful catalog photos are
+        // model/lifestyle shots; overlay produces bad results. The editor
+        // export or design image (above) are used instead.
       } catch (err) {
         this.logger.warn(
           `Mockup generation/upload failed for ${merchantProductId}, publishing without images: ${(err as Error).message}`,
@@ -304,27 +268,30 @@ export class ProductsService {
         if (fallback) mediaUrls.push(fallback);
       }
 
-      // 3. Build Shopify product input
+      // 3. Build Shopify product input (2024-01 schema).
+      // Pass `productOptions` so Shopify auto-creates all variant
+      // combinations. Then update the auto-created variants with
+      // prices/SKUs via productVariantsBulkUpdate.
+      // Build productOptions only when there are actual variant values.
+      // A product with 0 variants (no size/color data from the provider
+      // catalog) gets a single default variant from Shopify automatically.
+      const productOptions =
+        sizes.length > 0
+          ? [
+              { name: 'Size', values: sizes.map((s) => ({ name: s })) },
+              ...(uniqueColors.length > 1
+                ? [{ name: 'Color', values: uniqueColors.map((c) => ({ name: c })) }]
+                : []),
+            ]
+          : undefined;
+
       const shopifyInput = {
         title: product.title,
         descriptionHtml: product.description || `<p>Custom ${product.providerProduct.productType}</p>`,
         productType: product.providerProduct.productType,
         vendor: 'StellarPOD',
         tags: ['stellarpod', 'pod', 'custom', product.providerProduct.productType],
-        options: [
-          { name: 'Size', values: sizes.map((s) => ({ name: s })) },
-          ...(uniqueColors.length > 1
-            ? [{ name: 'Color', values: uniqueColors.map((c) => ({ name: c })) }]
-            : []),
-        ],
-        variants: variants.map((v) => ({
-          optionValues: [
-            { optionName: 'Size', name: v.size },
-            ...(uniqueColors.length > 1 ? [{ optionName: 'Color', name: v.color }] : []),
-          ],
-          price: String(product.retailPrice + v.additionalCost),
-          sku: `SPOD-${merchantProductId.slice(0, 8)}-${v.sku}`,
-        })),
+        ...(productOptions ? { productOptions } : {}),
         metafields: [
           { namespace: 'stellarpod', key: 'product_id', value: merchantProductId, type: 'single_line_text_field' },
           { namespace: 'stellarpod', key: 'design_id', value: product.designId, type: 'single_line_text_field' },
@@ -333,13 +300,39 @@ export class ProductsService {
         ],
       };
 
-      // 4. Create product on Shopify
-      const { productId: shopifyProductGid, variantIds } = await this.shopifyGql.productCreate(
-        store.shopifyDomain,
-        accessToken,
-        shopifyInput,
-        mediaUrls.length > 0 ? mediaUrls : undefined,
-      );
+      // 4. Create product on Shopify (auto-creates variants from options)
+      const { productId: shopifyProductGid, variantIds: autoVariantIds } =
+        await this.shopifyGql.productCreate(
+          store.shopifyDomain,
+          accessToken,
+          shopifyInput,
+          mediaUrls.length > 0 ? mediaUrls : undefined,
+        );
+
+      // 4a. Update auto-created variants with prices and SKUs.
+      // Shopify creates one variant per option combination; we match
+      // by position (options are ordered Size then Color, same as our
+      // variants array).
+      const variantIds = autoVariantIds;
+      if (autoVariantIds.length > 0) {
+        try {
+          await this.shopifyGql.productVariantsBulkUpdate(
+            store.shopifyDomain,
+            accessToken,
+            shopifyProductGid,
+            autoVariantIds.map((vid, i) => ({
+              id: vid,
+              price: String(
+                product.retailPrice + (variants[i]?.additionalCost ?? 0),
+              ),
+            })),
+          );
+        } catch (err) {
+          this.logger.warn(
+            `Variant price update failed (non-fatal): ${(err as Error).message}`,
+          );
+        }
+      }
 
       // 4b. Publish to Online Store sales channel so customers actually
       // see it on the storefront. `productCreate` alone leaves the

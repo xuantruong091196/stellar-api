@@ -169,15 +169,9 @@ export class NftService {
           });
 
           if (currentSupply >= item.merchantProduct.maxSupply) {
-            this.logger.log(
-              `Supply limit reached for product ${item.merchantProductId}: ${currentSupply}/${item.merchantProduct.maxSupply}`,
+            this.logger.warn(
+              `SUPPLY LIMIT REACHED for product ${item.merchantProductId}: ${currentSupply}/${item.merchantProduct.maxSupply} — no more NFTs should be minted`,
             );
-            await this.prisma.merchantProduct.update({
-              where: { id: item.merchantProductId },
-              data: { soldOut: true },
-            }).catch((err: Error) => {
-              this.logger.warn(`Failed to mark product ${item.merchantProductId} as soldOut: ${err.message}`);
-            });
           }
         }
 

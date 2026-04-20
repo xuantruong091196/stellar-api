@@ -179,7 +179,7 @@ export class PrintfulAdapter implements IProviderAdapter {
         email: input.shippingAddress.email || '',
         phone: input.shippingAddress.phone || '',
         message: 'Your purchase includes a blockchain-verified digital certificate. Scan the QR code to verify authenticity.',
-        logo_url: input.packingSlipUrl,
+        url: input.packingSlipUrl,
       };
     }
 

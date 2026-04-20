@@ -483,6 +483,11 @@ export class OrdersService {
       });
     }
 
+    // Clawback NFTs on cancellation/refund
+    this.nftService.clawbackOnRefund(orderId).catch((err: Error) => {
+      this.logger.error(`NFT clawback on refund failed for order ${orderId}: ${err.message}`);
+    });
+
     this.logger.log(
       `Order ${orderId} cancelled — ${refundable.length} escrow refund(s) kicked off`,
     );

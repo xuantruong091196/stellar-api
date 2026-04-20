@@ -159,6 +159,28 @@ export class NftService {
 
         this.logger.log(`NFT ${assetCode} minted for order ${order.id} (tx: ${txHash})`);
 
+        // Supply tracking for limited editions
+        if (item.merchantProduct.maxSupply) {
+          const currentSupply = await this.prisma.nftToken.count({
+            where: {
+              merchantProductId: item.merchantProductId,
+              status: { not: NftStatus.MINT_FAILED },
+            },
+          });
+
+          if (currentSupply >= item.merchantProduct.maxSupply) {
+            this.logger.log(
+              `Supply limit reached for product ${item.merchantProductId}: ${currentSupply}/${item.merchantProduct.maxSupply}`,
+            );
+            await this.prisma.merchantProduct.update({
+              where: { id: item.merchantProductId },
+              data: { soldOut: true },
+            }).catch((err: Error) => {
+              this.logger.warn(`Failed to mark product ${item.merchantProductId} as soldOut: ${err.message}`);
+            });
+          }
+        }
+
         // Send mint-ready email
         this.emailService.send({
           to: order.customerEmail,

@@ -30,6 +30,7 @@ import { NotificationsCleanupModule } from './notifications-cleanup/notification
 import { NftModule } from './nft/nft.module';
 import { BuyerModule } from './buyer/buyer.module';
 import { SystemMonitorModule } from './system-monitor/system-monitor.module';
+import { AiContentModule } from './ai-content/ai-content.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { SystemMonitorModule } from './system-monitor/system-monitor.module';
     NftModule,
     BuyerModule,
     SystemMonitorModule,
+    AiContentModule,
   ],
   providers: [
     {

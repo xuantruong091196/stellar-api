@@ -95,6 +95,11 @@ export default () => ({
     adminEmail: process.env.ADMIN_EMAIL || 'admin@stelo.life',
   },
 
+  ai: {
+    geminiApiKey: process.env.GEMINI_API_KEY,
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  },
+
   aws: {
     s3Bucket: process.env.R2_BUCKET || process.env.AWS_S3_BUCKET,
     r2AccountId: process.env.R2_ACCOUNT_ID,

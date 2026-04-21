@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { MockupService } from '../mockup/mockup.service';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
+import { SeoGeneratorService } from '../ai-content/seo-generator.service';
 import { safeImageFetch } from '../common/safe-fetch';
 import { CreateProductDto } from './dto/create-product.dto';
 
@@ -24,6 +25,7 @@ export class ProductsService {
     private readonly mockupService: MockupService,
     private readonly shopifyAuth: ShopifyAuthService,
     private readonly config: ConfigService,
+    private readonly seoGenerator: SeoGeneratorService,
   ) {
     this.platformFeeRate = this.config.get<number>('pricing.platformFeeRate') ?? 0.05;
   }
@@ -44,7 +46,10 @@ export class ProductsService {
     // 2. Validate provider product exists and is active
     const providerProduct = await this.prisma.providerProduct.findUnique({
       where: { id: dto.providerProductId },
-      include: { variants: { where: { inStock: true } } },
+      include: {
+        provider: true,
+        variants: { where: { inStock: true } },
+      },
     });
     if (!providerProduct || !providerProduct.isActive) {
       throw new NotFoundException('Provider product not found or inactive');
@@ -102,6 +107,33 @@ export class ProductsService {
       `Draft product created: ${product.id} (${dto.title}), margin: $${profitMargin.toFixed(2)}`,
     );
 
+    // Auto-generate SEO content (fire-and-forget for speed, but save when done)
+    try {
+      const seo = await this.seoGenerator.generate({
+        productTitle: dto.title,
+        productDescription: dto.description,
+        productType: providerProduct.productType,
+        designerName: providerProduct.provider?.name,
+        colors: Array.from(new Set(providerProduct.variants?.map((v: any) => v.color).filter(Boolean) || [])) as string[],
+        isBurnToClaim: dto.isBurnToClaim || false,
+      });
+
+      if (seo) {
+        await this.prisma.merchantProduct.update({
+          where: { id: product.id },
+          data: {
+            seoTitle: seo.seoTitle,
+            seoDescription: seo.seoDescription,
+            seoTags: seo.seoTags,
+            seoHandle: seo.seoHandle,
+          },
+        });
+        this.logger.log(`SEO generated for product ${product.id}`);
+      }
+    } catch (err) {
+      this.logger.warn(`SEO generation failed for ${product.id}: ${(err as Error).message}`);
+    }
+
     // Save editor-export mockup if provided (WYSIWYG — highest quality).
     // Await so the mockup is ready before merchant tries to publish.
     if (dto.mockupDataUrl) {
@@ -146,7 +178,10 @@ export class ProductsService {
         store: true,
         design: true,
         providerProduct: {
-          include: { variants: { where: { inStock: true }, orderBy: [{ size: 'asc' }, { color: 'asc' }] } },
+          include: {
+            provider: true,
+            variants: { where: { inStock: true }, orderBy: [{ size: 'asc' }, { color: 'asc' }] },
+          },
         },
       },
     });
@@ -291,8 +326,20 @@ export class ProductsService {
         title: product.title,
         descriptionHtml: product.description || `<p>Custom ${product.providerProduct.productType}</p>`,
         productType: product.providerProduct.productType,
-        vendor: 'StellarPOD',
-        tags: ['stellarpod', 'pod', 'custom', product.providerProduct.productType],
+        vendor: product.providerProduct?.provider?.name || 'StellarPOD',
+        tags:
+          product.seoTags && product.seoTags.length > 0
+            ? product.seoTags
+            : ['stellarpod', 'pod', 'custom', product.providerProduct.productType],
+        ...(product.seoHandle ? { handle: product.seoHandle } : {}),
+        ...(product.seoTitle || product.seoDescription
+          ? {
+              seo: {
+                ...(product.seoTitle ? { title: product.seoTitle } : {}),
+                ...(product.seoDescription ? { description: product.seoDescription } : {}),
+              },
+            }
+          : {}),
         ...(productOptions ? { productOptions } : {}),
         metafields: [
           { namespace: 'stellarpod', key: 'product_id', value: merchantProductId, type: 'single_line_text_field' },
@@ -755,6 +802,66 @@ export class ProductsService {
 
     await this.prisma.merchantProduct.delete({ where: { id: merchantProductId } });
     return { deleted: true };
+  }
+
+  /**
+   * Regenerate SEO content for an existing product.
+   */
+  async regenerateSeo(productId: string, callerStoreId: string) {
+    const product = await this.prisma.merchantProduct.findUnique({
+      where: { id: productId },
+      include: {
+        providerProduct: { include: { provider: true, variants: { where: { inStock: true } } } },
+      },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
+
+    const seo = await this.seoGenerator.generate({
+      productTitle: product.title,
+      productDescription: product.description,
+      productType: product.providerProduct?.productType || 'product',
+      designerName: product.providerProduct?.provider?.name,
+      colors: Array.from(new Set(product.providerProduct?.variants?.map((v: any) => v.color).filter(Boolean) || [])) as string[],
+      isBurnToClaim: product.isBurnToClaim,
+    });
+
+    if (!seo) throw new BadRequestException('SEO generation failed');
+
+    const updated = await this.prisma.merchantProduct.update({
+      where: { id: productId },
+      data: {
+        seoTitle: seo.seoTitle,
+        seoDescription: seo.seoDescription,
+        seoTags: seo.seoTags,
+        seoHandle: seo.seoHandle,
+      },
+    });
+
+    return { success: true, seo: updated };
+  }
+
+  /**
+   * Manually update SEO fields for a product.
+   */
+  async updateSeo(
+    productId: string,
+    callerStoreId: string,
+    dto: { seoTitle?: string; seoDescription?: string; seoTags?: string[]; seoHandle?: string },
+  ) {
+    const product = await this.prisma.merchantProduct.findUnique({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
+
+    return this.prisma.merchantProduct.update({
+      where: { id: productId },
+      data: {
+        ...(dto.seoTitle !== undefined ? { seoTitle: dto.seoTitle } : {}),
+        ...(dto.seoDescription !== undefined ? { seoDescription: dto.seoDescription } : {}),
+        ...(dto.seoTags !== undefined ? { seoTags: dto.seoTags } : {}),
+        ...(dto.seoHandle !== undefined ? { seoHandle: dto.seoHandle } : {}),
+      },
+    });
   }
 
   /**

@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Delete, Param, Body, Query, Req, HttpCode, HttpStatus,
+  Controller, Get, Post, Patch, Delete, Param, Body, Query, Req, HttpCode, HttpStatus,
   ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiParam, ApiQuery, ApiResponse } from '@nestjs/swagger';
@@ -86,6 +86,24 @@ export class ProductsController {
   @ApiOperation({ summary: 'Delete product (also removes from Shopify if published)' })
   async deleteProduct(@Param('productId') productId: string, @Req() req: any) {
     return this.productsService.deleteProduct(productId, this.requireStoreId(req));
+  }
+
+  @Post(':productId/generate-seo')
+  @ApiOperation({ summary: 'Regenerate SEO content for a product' })
+  async regenerateSeo(@Param('productId') productId: string, @Req() req: any) {
+    const callerStoreId = this.requireStoreId(req);
+    return this.productsService.regenerateSeo(productId, callerStoreId);
+  }
+
+  @Patch(':productId/seo')
+  @ApiOperation({ summary: 'Manually update SEO fields for a product' })
+  async updateSeo(
+    @Param('productId') productId: string,
+    @Body() dto: { seoTitle?: string; seoDescription?: string; seoTags?: string[]; seoHandle?: string },
+    @Req() req: any,
+  ) {
+    const callerStoreId = this.requireStoreId(req);
+    return this.productsService.updateSeo(productId, callerStoreId, dto);
   }
 
   @Get('pricing/calculate')

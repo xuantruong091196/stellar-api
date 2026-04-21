@@ -4,9 +4,10 @@ import { ProductsController } from './products.controller';
 import { ShopifyGraphqlModule } from '../shopify-graphql/shopify-graphql.module';
 import { MockupModule } from '../mockup/mockup.module';
 import { AuthModule } from '../auth/auth.module';
+import { AiContentModule } from '../ai-content/ai-content.module';
 
 @Module({
-  imports: [ShopifyGraphqlModule, MockupModule, AuthModule],
+  imports: [ShopifyGraphqlModule, MockupModule, AuthModule, AiContentModule],
   controllers: [ProductsController],
   providers: [ProductsService],
   exports: [ProductsService],

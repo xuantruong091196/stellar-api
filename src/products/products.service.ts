@@ -805,7 +805,44 @@ export class ProductsService {
   }
 
   /**
+   * Sync SEO fields to Shopify if the product is already published.
+   * Fire-and-forget — logs warnings on failure but doesn't block the caller.
+   */
+  private async syncSeoToShopify(productId: string) {
+    const product = await this.prisma.merchantProduct.findUnique({
+      where: { id: productId },
+      include: { store: true },
+    });
+    if (!product || !product.shopifyProductGid || !product.store) return;
+
+    try {
+      const accessToken = this.shopifyAuth.getAccessToken(product.store);
+      await this.shopifyGql.productUpdate(
+        product.store.shopifyDomain,
+        accessToken,
+        product.shopifyProductGid,
+        {
+          ...(product.seoHandle ? { handle: product.seoHandle } : {}),
+          ...(product.seoTags && product.seoTags.length > 0 ? { tags: product.seoTags } : {}),
+          ...(product.seoTitle || product.seoDescription
+            ? {
+                seo: {
+                  ...(product.seoTitle ? { title: product.seoTitle } : {}),
+                  ...(product.seoDescription ? { description: product.seoDescription } : {}),
+                },
+              }
+            : {}),
+        },
+      );
+      this.logger.log(`SEO synced to Shopify for product ${productId}`);
+    } catch (err) {
+      this.logger.warn(`SEO sync to Shopify failed for ${productId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Regenerate SEO content for an existing product.
+   * Auto-syncs to Shopify if published.
    */
   async regenerateSeo(productId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
@@ -838,11 +875,15 @@ export class ProductsService {
       },
     });
 
+    // Sync to Shopify if already published
+    await this.syncSeoToShopify(productId);
+
     return { success: true, seo: updated };
   }
 
   /**
    * Manually update SEO fields for a product.
+   * Auto-syncs to Shopify if published.
    */
   async updateSeo(
     productId: string,
@@ -853,7 +894,7 @@ export class ProductsService {
     if (!product) throw new NotFoundException('Product not found');
     if (product.storeId !== callerStoreId) throw new ForbiddenException();
 
-    return this.prisma.merchantProduct.update({
+    const updated = await this.prisma.merchantProduct.update({
       where: { id: productId },
       data: {
         ...(dto.seoTitle !== undefined ? { seoTitle: dto.seoTitle } : {}),
@@ -862,6 +903,11 @@ export class ProductsService {
         ...(dto.seoHandle !== undefined ? { seoHandle: dto.seoHandle } : {}),
       },
     });
+
+    // Sync to Shopify if already published
+    await this.syncSeoToShopify(productId);
+
+    return updated;
   }
 
   /**

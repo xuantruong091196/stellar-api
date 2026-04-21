@@ -175,6 +175,11 @@ export class ShopifyGraphqlService {
       productType?: string;
       vendor?: string;
       tags?: string[];
+      handle?: string;
+      seo?: {
+        title?: string;
+        description?: string;
+      };
       productOptions?: Array<{ name: string; values: Array<{ name: string }> }>;
       metafields?: Array<{ namespace: string; key: string; value: string; type: string }>;
     },
@@ -228,6 +233,46 @@ export class ShopifyGraphqlService {
       productId: product.id,
       variantIds: product.variants.edges.map((e) => e.node.id),
     };
+  }
+
+  /**
+   * Update a product on Shopify. Accepts SEO, handle, title, description,
+   * and tags. Uses the 2024-01+ `ProductInput` type so new fields like
+   * `seo` and `handle` are accepted as-is.
+   */
+  async productUpdate(
+    shopDomain: string,
+    accessToken: string,
+    productId: string,
+    input: {
+      title?: string;
+      descriptionHtml?: string;
+      handle?: string;
+      seo?: { title?: string; description?: string };
+      tags?: string[];
+    },
+  ): Promise<void> {
+    const mutation = `
+      mutation productUpdate($input: ProductInput!) {
+        productUpdate(input: $input) {
+          product { id }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const result = await this.query<{
+      productUpdate: {
+        product: { id: string } | null;
+        userErrors: UserError[];
+      };
+    }>(shopDomain, accessToken, mutation, { input: { id: productId, ...input } });
+
+    if (result.productUpdate.userErrors.length > 0) {
+      throw new Error(
+        `Product update failed: ${result.productUpdate.userErrors.map((e) => `${e.field.join('.')}: ${e.message}`).join(', ')}`,
+      );
+    }
   }
 
   /**

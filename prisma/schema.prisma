@@ -324,6 +324,10 @@ model MerchantProduct {
   publishedAt        DateTime?
   isBurnToClaim      Boolean   @default(false)
   maxSupply          Int?
+  seoTitle       String?
+  seoDescription String?
+  seoTags        String[]
+  seoHandle      String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 

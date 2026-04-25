@@ -108,4 +108,31 @@ export default () => ({
     secretAccessKey: readSecret('AWS_SECRET_ACCESS_KEY'),
     r2PublicUrl: process.env.R2_PUBLIC_URL,
   },
+
+  trends: {
+    redditClientId: process.env.REDDIT_CLIENT_ID,
+    redditClientSecret: process.env.REDDIT_CLIENT_SECRET,
+    redditUsername: process.env.REDDIT_USERNAME,
+    redditPassword: process.env.REDDIT_PASSWORD,
+    redditUserAgent: process.env.REDDIT_USER_AGENT || 'stelo-trend-bot/1.0',
+    twitterApiIoKey: process.env.TWITTERAPI_IO_KEY,
+    rapidApiKey: process.env.RAPIDAPI_KEY,
+    rapidApiPinterestHost: process.env.RAPIDAPI_PINTEREST_HOST || 'pinterest-scraper.p.rapidapi.com',
+    rapidApiTiktokHost: process.env.RAPIDAPI_TIKTOK_HOST || 'tikapi.p.rapidapi.com',
+    serpApiKey: process.env.SERPAPI_KEY,
+    replicateApiToken: process.env.REPLICATE_API_TOKEN,
+    pythonBinary: process.env.PYTHON_BINARY || 'python3',
+  },
+
+  subscription: {
+    treasuryStellarAddress: process.env.TREASURY_STELLAR_ADDRESS,
+    pricingUsdc: {
+      m1: parseFloat(process.env.SUB_PRICE_1MO || '19'),
+      m6: parseFloat(process.env.SUB_PRICE_6MO || '97'),
+      m12: parseFloat(process.env.SUB_PRICE_12MO || '160'),
+    },
+    priceLockTtlSeconds: parseInt(process.env.PRICE_LOCK_TTL || '900', 10),
+    xlmPriceCacheTtlSeconds: 60,
+    coingeckoUrl: 'https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd',
+  },
 });

@@ -31,6 +31,8 @@ import { NftModule } from './nft/nft.module';
 import { BuyerModule } from './buyer/buyer.module';
 import { SystemMonitorModule } from './system-monitor/system-monitor.module';
 import { AiContentModule } from './ai-content/ai-content.module';
+import { TrendsModule } from './trends/trends.module';
+import { SubscriptionModule } from './subscription/subscription.module';
 
 @Module({
   imports: [
@@ -66,6 +68,8 @@ import { AiContentModule } from './ai-content/ai-content.module';
     BuyerModule,
     SystemMonitorModule,
     AiContentModule,
+    SubscriptionModule,
+    TrendsModule,
   ],
   providers: [
     {

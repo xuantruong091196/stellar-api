@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TrendSource } from '../../../generated/prisma';
+import { fetchWithTimeout } from '../../common/safe-fetch';
 import { NicheConfig, TrendCandidate, TrendSourceAdapter } from './source-types';
 
 interface TikTokVideo {
@@ -31,8 +32,9 @@ export class TiktokAdapter implements TrendSourceAdapter {
     for (const tag of niche.tiktokHashtags) {
       try {
         const url = `https://${this.host}/hashtag/posts?hashtag=${encodeURIComponent(tag)}&count=20`;
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: { 'x-rapidapi-key': this.apiKey, 'x-rapidapi-host': this.host },
+          timeoutMs: 15_000,
         });
         if (!res.ok) {
           this.logger.warn(`TikTok #${tag}: HTTP ${res.status}`);

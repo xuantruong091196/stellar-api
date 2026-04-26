@@ -131,6 +131,11 @@ export class StellarService implements OnModuleInit {
     return this.escrowKeypair?.publicKey() || null;
   }
 
+  /** Network passphrase used by this Stellar service (testnet or public). */
+  getNetworkPassphrase(): string {
+    return this.networkPassphrase;
+  }
+
   /**
    * Build an unsigned escrow lock transaction.
    * Merchant sends USDC to the escrow HOLDING account (not the provider).
@@ -1008,5 +1013,75 @@ export class StellarService implements OnModuleInit {
 
     this.logger.log(`${type} tx submitted: hash=${result.hash}, ledger=${result.ledger}`);
     return { txHash: result.hash, ledger: result.ledger };
+  }
+
+  // ─── SUBSCRIPTION PAYMENTS ──────────────────
+
+  async sendPaymentToTreasury(
+    sourceKeypair: StellarSdk.Keypair,
+    treasuryAddress: string,
+    currency: string,
+    amount: number,
+  ): Promise<{ txHash: string; ledger: number }> {
+    return this.withStellarLock(async () => {
+      const asset =
+        currency === 'XLM'
+          ? StellarSdk.Asset.native()
+          : new StellarSdk.Asset('USDC', this.usdcIssuer);
+      const account = await this.server.loadAccount(sourceKeypair.publicKey());
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: treasuryAddress,
+            asset,
+            amount: amount.toFixed(7),
+          }),
+        )
+        .addMemo(StellarSdk.Memo.text(`stelo:sub`))
+        .setTimeout(300)
+        .build();
+      tx.sign(sourceKeypair);
+      const result = await this.submitWithFeeBump(tx, sourceKeypair);
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  async buildPaymentXdr(
+    sourceAddress: string,
+    destinationAddress: string,
+    currency: string,
+    amount: number,
+  ): Promise<string> {
+    const asset =
+      currency === 'XLM'
+        ? StellarSdk.Asset.native()
+        : new StellarSdk.Asset('USDC', this.usdcIssuer);
+    const account = await this.server.loadAccount(sourceAddress);
+    const tx = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        StellarSdk.Operation.payment({
+          destination: destinationAddress,
+          asset,
+          amount: amount.toFixed(7),
+        }),
+      )
+      .addMemo(StellarSdk.Memo.text(`stelo:sub`))
+      .setTimeout(900)
+      .build();
+    return tx.toXDR();
+  }
+
+  async submitSignedXdr(signedXdr: string): Promise<{ txHash: string; ledger: number }> {
+    return this.withStellarLock(async () => {
+      const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase) as StellarSdk.Transaction;
+      const result = await this.server.submitTransaction(tx);
+      return { txHash: result.hash, ledger: result.ledger };
+    });
   }
 }

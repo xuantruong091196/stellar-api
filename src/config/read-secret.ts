@@ -18,6 +18,15 @@ const SECRET_NAME_MAP: Record<string, string> = {
   RESEND_API_KEY: 'resend_api_key',
   ADMIN_API_KEY: 'admin_api_key',
   PROVIDER_JWT_SECRET: 'provider_jwt_secret',
+  GEMINI_API_KEY: 'gemini_api_key',
+  REDDIT_CLIENT_ID: 'reddit_client_id',
+  REDDIT_CLIENT_SECRET: 'reddit_client_secret',
+  REDDIT_USERNAME: 'reddit_username',
+  REDDIT_PASSWORD: 'reddit_password',
+  TWITTERAPI_IO_KEY: 'twitterapi_io_key',
+  RAPIDAPI_KEY: 'rapidapi_key',
+  SERPAPI_KEY: 'serpapi_key',
+  REPLICATE_API_TOKEN: 'replicate_api_token',
 };
 
 /**

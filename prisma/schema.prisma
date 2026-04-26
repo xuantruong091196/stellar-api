@@ -742,11 +742,11 @@ model TrendItem {
 model TrendDesign {
   id                    String            @id @default(uuid())
   trendItemId           String
-  trendItem             TrendItem         @relation(fields: [trendItemId], references: [id])
+  trendItem             TrendItem         @relation(fields: [trendItemId], references: [id], onDelete: Cascade)
   designId              String?
-  design                Design?           @relation(fields: [designId], references: [id])
+  design                Design?           @relation(fields: [designId], references: [id], onDelete: SetNull)
   storeId               String
-  store                 Store             @relation(fields: [storeId], references: [id])
+  store                 Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
   promptUsed            String
   styleUsed             Json?
   status                TrendDesignStatus @default(PENDING)
@@ -763,7 +763,7 @@ model TrendDesign {
 model SubscriptionPriceLock {
   id              String    @id @default(uuid())
   storeId         String
-  store           Store     @relation(fields: [storeId], references: [id])
+  store           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
   periodMonths    Int
   currency        String
   amountUsdc      Float
@@ -780,7 +780,7 @@ model SubscriptionPriceLock {
 model Subscription {
   id              String    @id @default(uuid())
   storeId         String    @unique
-  store           Store     @relation(fields: [storeId], references: [id])
+  store           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
   plan            String
   periodMonths    Int
   currency        String
@@ -801,7 +801,7 @@ model Subscription {
 model TrendQuota {
   id                String   @id @default(uuid())
   storeId           String
-  store             Store    @relation(fields: [storeId], references: [id])
+  store             Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
   date              DateTime @db.Date
   trendsViewed      Int      @default(0)
   designsGenerated  Int      @default(0)

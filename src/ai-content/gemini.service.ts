@@ -50,4 +50,19 @@ export class GeminiService {
       return null;
     }
   }
+
+  async generateImage(prompt: string): Promise<string | null> {
+    if (!this.client) return null;
+    try {
+      const model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash-image-preview' });
+      const result = await model.generateContent(prompt);
+      const parts = result.response.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));
+      if (!imagePart || !imagePart.inlineData) return null;
+      return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
+    } catch (err) {
+      this.logger.warn(`Image generation failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
 }

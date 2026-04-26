@@ -96,7 +96,7 @@ export default () => ({
   },
 
   ai: {
-    geminiApiKey: process.env.GEMINI_API_KEY,
+    geminiApiKey: readSecret('GEMINI_API_KEY'),
     geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   },
 
@@ -110,17 +110,17 @@ export default () => ({
   },
 
   trends: {
-    redditClientId: process.env.REDDIT_CLIENT_ID,
-    redditClientSecret: process.env.REDDIT_CLIENT_SECRET,
-    redditUsername: process.env.REDDIT_USERNAME,
-    redditPassword: process.env.REDDIT_PASSWORD,
+    redditClientId: readSecret('REDDIT_CLIENT_ID'),
+    redditClientSecret: readSecret('REDDIT_CLIENT_SECRET'),
+    redditUsername: readSecret('REDDIT_USERNAME'),
+    redditPassword: readSecret('REDDIT_PASSWORD'),
     redditUserAgent: process.env.REDDIT_USER_AGENT || 'stelo-trend-bot/1.0',
-    twitterApiIoKey: process.env.TWITTERAPI_IO_KEY,
-    rapidApiKey: process.env.RAPIDAPI_KEY,
+    twitterApiIoKey: readSecret('TWITTERAPI_IO_KEY'),
+    rapidApiKey: readSecret('RAPIDAPI_KEY'),
     rapidApiPinterestHost: process.env.RAPIDAPI_PINTEREST_HOST || 'pinterest-scraper.p.rapidapi.com',
     rapidApiTiktokHost: process.env.RAPIDAPI_TIKTOK_HOST || 'tikapi.p.rapidapi.com',
-    serpApiKey: process.env.SERPAPI_KEY,
-    replicateApiToken: process.env.REPLICATE_API_TOKEN,
+    serpApiKey: readSecret('SERPAPI_KEY'),
+    replicateApiToken: readSecret('REPLICATE_API_TOKEN'),
     pythonBinary: process.env.PYTHON_BINARY || 'python3',
   },
 

@@ -72,6 +72,7 @@ export class ShopifySessionGuard implements CanActivate {
           },
         });
         request.store = store;
+        request.storeId = store.id;
         if (isAdmin && store.plan !== 'admin') {
           throw new UnauthorizedException('Admin access required');
         }
@@ -157,6 +158,7 @@ export class ShopifySessionGuard implements CanActivate {
       });
       if (linked) {
         request.store = linked;
+        request.storeId = linked.id;
         if (isAdmin && linked.plan !== 'admin') {
           throw new UnauthorizedException('Admin access required');
         }
@@ -182,6 +184,7 @@ export class ShopifySessionGuard implements CanActivate {
         },
       });
       request.store = stub;
+      request.storeId = stub.id;
       if (isAdmin && stub.plan !== 'admin') {
         throw new UnauthorizedException('Admin access required');
       }
@@ -251,6 +254,7 @@ export class ShopifySessionGuard implements CanActivate {
     // Attach to request
     request.shopifySession = payload;
     request.store = store;
+    request.storeId = store.id;
 
     // Admin-only endpoints require store.plan === 'admin'
     if (isAdmin && store.plan !== 'admin') {

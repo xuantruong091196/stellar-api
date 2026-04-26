@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TrendSource } from '../../../generated/prisma';
+import { fetchWithTimeout } from '../../common/safe-fetch';
 import { NicheConfig, TrendCandidate, TrendSourceAdapter } from './source-types';
 
 interface TwitterApiTweet {
@@ -32,7 +33,7 @@ export class TwitterAdapter implements TrendSourceAdapter {
     for (const tag of niche.twitterHashtags) {
       try {
         const url = `${this.baseUrl}/twitter/tweet/advanced_search?query=${encodeURIComponent(`#${tag} min_faves:500`)}&queryType=Top`;
-        const res = await fetch(url, { headers: { 'x-api-key': this.apiKey } });
+        const res = await fetchWithTimeout(url, { headers: { 'x-api-key': this.apiKey }, timeoutMs: 15_000 });
         if (!res.ok) {
           this.logger.warn(`Twitter ${tag}: HTTP ${res.status}`);
           continue;

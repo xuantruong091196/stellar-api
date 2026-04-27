@@ -1,40 +1,57 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Snoowrap from 'snoowrap';
 import { TrendSource } from '../../../generated/prisma';
+import { fetchWithTimeout } from '../../common/safe-fetch';
 import { NicheConfig, TrendCandidate, TrendSourceAdapter } from './source-types';
 
+interface RedditPost {
+  id: string;
+  permalink: string;
+  title: string;
+  selftext?: string;
+  ups: number;
+  num_comments: number;
+  created_utc: number;
+}
+
+interface RedditListingResponse {
+  data?: { children?: Array<{ data: RedditPost }> };
+}
+
+interface RedditAboutResponse {
+  data?: { subscribers?: number };
+}
+
+/**
+ * Reddit adapter using public JSON endpoints — no OAuth, no API key needed.
+ *
+ * Public endpoints (anonymous):
+ *  - GET https://www.reddit.com/r/{sub}/hot.json?limit=N — returns hot posts
+ *  - GET https://www.reddit.com/r/{sub}/about.json     — returns subreddit metadata
+ *
+ * Constraints:
+ *  - User-Agent header REQUIRED (Reddit blocks default Node UAs)
+ *  - 60 req/min rate limit for unauthenticated traffic — daily cron with ~50 reqs is fine
+ *  - Read-only: cannot vote/comment/post (we don't need to)
+ */
 @Injectable()
 export class RedditAdapter implements TrendSourceAdapter {
   readonly name = 'reddit';
   private readonly logger = new Logger(RedditAdapter.name);
-  private readonly client: Snoowrap | null;
+  private readonly userAgent: string;
   private readonly subBaselineCache = new Map<string, { median: number; subscribers: number; cachedAt: number }>();
 
   constructor(private readonly config: ConfigService) {
-    const clientId = this.config.get<string>('trends.redditClientId');
-    const clientSecret = this.config.get<string>('trends.redditClientSecret');
-    const username = this.config.get<string>('trends.redditUsername');
-    const password = this.config.get<string>('trends.redditPassword');
-    const userAgent = this.config.get<string>('trends.redditUserAgent') || 'stelo-trend-bot/1.0';
-
-    if (clientId && clientSecret && username && password) {
-      this.client = new Snoowrap({ userAgent, clientId, clientSecret, username, password });
-      this.logger.log('Reddit client initialized');
-    } else {
-      this.client = null;
-      this.logger.warn('Reddit credentials missing — adapter disabled');
-    }
+    this.userAgent = this.config.get<string>('trends.redditUserAgent') || 'stelo-trend-bot/1.0';
   }
 
   async fetchForNiche(niche: NicheConfig): Promise<TrendCandidate[]> {
-    if (!this.client) return [];
     const out: TrendCandidate[] = [];
 
     for (const sub of niche.redditSubs) {
       try {
         const baseline = await this.getSubBaseline(sub);
-        const posts = await this.client.getSubreddit(sub).getHot({ limit: 50 });
+        const posts = await this.fetchHot(sub, 50);
 
         for (const post of posts) {
           const upvotes = post.ups;
@@ -68,21 +85,45 @@ export class RedditAdapter implements TrendSourceAdapter {
     return out;
   }
 
+  private async fetchHot(sub: string, limit: number): Promise<RedditPost[]> {
+    const url = `https://www.reddit.com/r/${encodeURIComponent(sub)}/hot.json?limit=${limit}&raw_json=1`;
+    const res = await fetchWithTimeout(url, {
+      headers: { 'User-Agent': this.userAgent, Accept: 'application/json' },
+      timeoutMs: 15_000,
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as RedditListingResponse;
+    return (data.data?.children || []).map((c) => c.data).filter((p): p is RedditPost => !!p);
+  }
+
+  private async fetchSubInfo(sub: string): Promise<{ subscribers: number }> {
+    const url = `https://www.reddit.com/r/${encodeURIComponent(sub)}/about.json`;
+    const res = await fetchWithTimeout(url, {
+      headers: { 'User-Agent': this.userAgent, Accept: 'application/json' },
+      timeoutMs: 10_000,
+    });
+    if (!res.ok) return { subscribers: 10_000 };
+    const data = (await res.json()) as RedditAboutResponse;
+    return { subscribers: data.data?.subscribers || 10_000 };
+  }
+
   private async getSubBaseline(sub: string): Promise<{ median: number; subscribers: number }> {
-    if (!this.client) return { median: 100, subscribers: 10_000 };
     const cached = this.subBaselineCache.get(sub);
     const now = Date.now();
     if (cached && now - cached.cachedAt < 24 * 3_600_000) {
       return { median: cached.median, subscribers: cached.subscribers };
     }
     try {
-      const subreddit = (await (this.client.getSubreddit(sub).fetch() as unknown as Promise<{ subscribers: number }>));
-      const recent = await this.client.getSubreddit(sub).getHot({ limit: 100 });
+      const [info, recent] = await Promise.all([
+        this.fetchSubInfo(sub),
+        this.fetchHot(sub, 100),
+      ]);
       const ups = recent.map((p) => p.ups).sort((a, b) => a - b);
       const median = ups[Math.floor(ups.length / 2)] || 100;
-      const subscribers = subreddit.subscribers || 10_000;
-      this.subBaselineCache.set(sub, { median, subscribers, cachedAt: now });
-      return { median, subscribers };
+      this.subBaselineCache.set(sub, { median, subscribers: info.subscribers, cachedAt: now });
+      return { median, subscribers: info.subscribers };
     } catch {
       return { median: 100, subscribers: 10_000 };
     }

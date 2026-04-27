@@ -37,12 +37,30 @@ function isAllowedPinUrl(url: string): boolean {
   }
 }
 
-interface RapidApiPin {
-  id: string;
+interface PinterestImageVariant {
   url: string;
-  image_url: string;
+  width?: number;
+  height?: number;
+}
+
+interface UnofficialPinterestPin {
+  id: string;
+  seo_alt_text?: string;
+  auto_alt_text?: string;
   title?: string;
+  description?: string;
+  images?: {
+    orig?: PinterestImageVariant;
+    '736x'?: PinterestImageVariant;
+    '474x'?: PinterestImageVariant;
+    '236x'?: PinterestImageVariant;
+  };
   board?: { name?: string };
+}
+
+interface UnofficialPinterestResponse {
+  status?: string;
+  data?: UnofficialPinterestPin[];
 }
 
 @Injectable()
@@ -54,7 +72,7 @@ export class PinterestAdapter {
 
   constructor(private readonly config: ConfigService) {
     this.apiKey = this.config.get<string>('trends.rapidApiKey');
-    this.host = this.config.get<string>('trends.rapidApiPinterestHost') || 'pinterest-scraper.p.rapidapi.com';
+    this.host = this.config.get<string>('trends.rapidApiPinterestHost') || 'unofficial-pinterest-api.p.rapidapi.com';
     if (!this.apiKey) this.logger.warn('RapidAPI key missing — Pinterest adapter disabled');
   }
 
@@ -62,7 +80,7 @@ export class PinterestAdapter {
     if (!this.apiKey) return [];
 
     try {
-      const url = `https://${this.host}/search/pins?query=${encodeURIComponent(query)}&limit=${limit}`;
+      const url = `https://${this.host}/pinterest/pins/relevance?keyword=${encodeURIComponent(query)}&num=${limit}`;
       const res = await fetchWithTimeout(url, {
         headers: { 'x-rapidapi-key': this.apiKey, 'x-rapidapi-host': this.host },
         timeoutMs: 15_000,
@@ -71,25 +89,39 @@ export class PinterestAdapter {
         this.logger.warn(`Pinterest HTTP ${res.status} for "${query}"`);
         return [];
       }
-      const data = (await res.json()) as { pins?: RapidApiPin[] };
+      const data = (await res.json()) as UnofficialPinterestResponse;
+      if (data.status && data.status !== 'success') {
+        this.logger.warn(`Pinterest API status=${data.status} for "${query}"`);
+        return [];
+      }
       const refs: StyleRef[] = [];
 
-      for (const pin of (data.pins || []).slice(0, limit)) {
+      for (const pin of (data.data || []).slice(0, limit)) {
+        // Pick best available image variant (orig > 736x > 474x > 236x)
+        const imageUrl =
+          pin.images?.orig?.url ||
+          pin.images?.['736x']?.url ||
+          pin.images?.['474x']?.url ||
+          pin.images?.['236x']?.url ||
+          '';
+        if (!imageUrl) continue;
+
         // Reject pins with untrusted URLs (XSS protection)
-        if (!isAllowedImageUrl(pin.image_url || '')) {
+        if (!isAllowedImageUrl(imageUrl)) {
           this.logger.warn(`Skipping pin with disallowed image URL host`);
           continue;
         }
-        if (pin.url && !isAllowedPinUrl(pin.url)) {
-          this.logger.warn(`Skipping pin with disallowed pin URL host`);
-          continue;
-        }
-        const palette = await this.extractPalette(pin.image_url);
+        // Construct canonical pin URL from id
+        const pinUrl = pin.id ? `https://www.pinterest.com/pin/${pin.id}/` : '';
+        if (pinUrl && !isAllowedPinUrl(pinUrl)) continue;
+
+        const titleForTags = pin.seo_alt_text || pin.auto_alt_text || pin.title || pin.description || '';
+        const palette = await this.extractPalette(imageUrl);
         refs.push({
-          pinUrl: pin.url,
-          imageUrl: pin.image_url,
+          pinUrl,
+          imageUrl,
           palette,
-          styleTags: this.guessStyleTags(pin.title || ''),
+          styleTags: this.guessStyleTags(titleForTags),
           boardName: pin.board?.name,
         });
       }

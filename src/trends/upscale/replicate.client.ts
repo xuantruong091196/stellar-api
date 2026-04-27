@@ -1,11 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Replicate from 'replicate';
+// replicate@1.x uses CJS module.exports directly (no default export)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Replicate = require('replicate');
+type ReplicateClientType = InstanceType<typeof Replicate>;
 
 @Injectable()
 export class ReplicateClient {
   private readonly logger = new Logger(ReplicateClient.name);
-  private readonly client: Replicate | null;
+  private readonly client: ReplicateClientType | null;
 
   constructor(private readonly config: ConfigService) {
     const token = this.config.get<string>('trends.replicateApiToken');

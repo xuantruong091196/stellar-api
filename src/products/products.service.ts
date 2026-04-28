@@ -107,6 +107,13 @@ export class ProductsService {
       `Draft product created: ${product.id} (${dto.title}), margin: $${profitMargin.toFixed(2)}`,
     );
 
+    // If this design was generated from a trend, mark the TrendDesign as "used"
+    // so it survives the 30d cleanup cron.
+    await this.prisma.trendDesign.updateMany({
+      where: { designId: dto.designId, expiresAt: { not: null } },
+      data: { expiresAt: null },
+    });
+
     // Auto-generate SEO content (fire-and-forget for speed, but save when done)
     try {
       const seo = await this.seoGenerator.generate({

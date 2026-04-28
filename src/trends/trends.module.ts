@@ -19,6 +19,7 @@ import { CopyrightSerpApi } from './scoring/copyright.serpapi';
 import { EmbeddingService } from './scoring/embedding.service';
 import { ReplicateClient } from './upscale/replicate.client';
 import { CompositeService } from './composite/composite.service';
+import { TrendCleanupService } from './trend-cleanup.service';
 import { SubscriptionModule } from '../subscription/subscription.module';
 
 @Module({
@@ -40,6 +41,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     EmbeddingService,
     ReplicateClient,
     CompositeService,
+    TrendCleanupService,
     S3Service,
   ],
   exports: [TrendsService],

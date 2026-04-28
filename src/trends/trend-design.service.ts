@@ -39,6 +39,7 @@ export class TrendDesignService implements OnModuleInit {
 
     const prompt = this.buildPrompt(trendItem, params.providerProductId);
 
+    const expiresAt = new Date(Date.now() + 30 * 24 * 3_600_000);
     const trendDesign = await this.prisma.trendDesign.create({
       data: {
         trendItemId: trendItem.id,
@@ -46,6 +47,7 @@ export class TrendDesignService implements OnModuleInit {
         promptUsed: prompt,
         styleUsed: trendItem.styleRefs as any,
         status: TrendDesignStatus.PENDING,
+        expiresAt,
       },
     });
 

@@ -85,7 +85,7 @@ export class TrendIngestService {
       const embedding = await this.embedding.embed(cand.keyword);
       const virality = this.computeVirality(cand);
 
-      if (embedding) {
+      if (embedding && embedding.length > 0) {
         const vecLiteral = `[${embedding.join(',')}]`;
         const neighbors = await this.prisma.$queryRawUnsafe<Array<{ id: string; distance: number }>>(
           `SELECT id, embedding <=> $1::vector AS distance
@@ -100,13 +100,18 @@ export class TrendIngestService {
         );
         const closest = neighbors[0];
         if (closest && closest.distance < this.DEDUP_DISTANCE_THRESHOLD) {
+          const bumpData: { engagementCount?: { increment: number }; growthVelocity?: number; fetchedAt: Date } = {
+            fetchedAt: new Date(),
+          };
+          if (cand.engagementCount && cand.engagementCount > 0) {
+            bumpData.engagementCount = { increment: cand.engagementCount };
+          }
+          if (cand.growthVelocity && cand.growthVelocity > 0) {
+            bumpData.growthVelocity = cand.growthVelocity; // overwrite with new velocity if non-zero
+          }
           await this.prisma.trendItem.update({
             where: { id: closest.id },
-            data: {
-              engagementCount: cand.engagementCount ?? undefined,
-              growthVelocity: cand.growthVelocity ?? undefined,
-              fetchedAt: new Date(),
-            },
+            data: bumpData,
           });
           this.logger.log(`Dedup hit for ${cand.source}:${cand.sourceId} → bumped ${closest.id} (distance ${closest.distance.toFixed(3)})`);
           continue; // skip to next candidate

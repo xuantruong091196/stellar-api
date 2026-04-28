@@ -16,6 +16,8 @@ import { NicheConfig, TrendCandidate } from './sources/source-types';
 @Injectable()
 export class TrendIngestService {
   private readonly logger = new Logger(TrendIngestService.name);
+  // pgvector cosine distance; 0.08 corresponds to similarity > ~0.92.
+  private readonly DEDUP_DISTANCE_THRESHOLD = 0.08;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -82,6 +84,34 @@ export class TrendIngestService {
 
       const embedding = await this.embedding.embed(cand.keyword);
       const virality = this.computeVirality(cand);
+
+      if (embedding) {
+        const vecLiteral = `[${embedding.join(',')}]`;
+        const neighbors = await this.prisma.$queryRawUnsafe<Array<{ id: string; distance: number }>>(
+          `SELECT id, embedding <=> $1::vector AS distance
+           FROM trend_items
+           WHERE embedding IS NOT NULL
+             AND "expiresAt" > now()
+             AND niche = $2
+           ORDER BY distance ASC
+           LIMIT 1`,
+          vecLiteral,
+          niche.slug,
+        );
+        const closest = neighbors[0];
+        if (closest && closest.distance < this.DEDUP_DISTANCE_THRESHOLD) {
+          await this.prisma.trendItem.update({
+            where: { id: closest.id },
+            data: {
+              engagementCount: cand.engagementCount ?? undefined,
+              growthVelocity: cand.growthVelocity ?? undefined,
+              fetchedAt: new Date(),
+            },
+          });
+          this.logger.log(`Dedup hit for ${cand.source}:${cand.sourceId} → bumped ${closest.id} (distance ${closest.distance.toFixed(3)})`);
+          continue; // skip to next candidate
+        }
+      }
 
       try {
         const existing = await this.prisma.trendItem.findUnique({

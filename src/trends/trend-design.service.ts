@@ -73,7 +73,7 @@ Niche: ${trendItem.niche}.
 Quote/Keyword: "${sanitizedKeyword}".
 Style: ${tags || 'modern typography'}.
 Palette: ${palette || '#000000, #ffffff'}.
-Requirements: transparent PNG background, centered composition, typography is the hero, no logos or copyrighted characters, square 1024x1024, high contrast.`;
+Requirements: transparent PNG background, centered composition, typography is the hero, no logos or copyrighted characters, PORTRAIT aspect 5:6 (output dimensions approximately 832x1216), high contrast.`;
   }
 
   private async processJob(trendDesignId: string) {
@@ -98,8 +98,13 @@ Requirements: transparent PNG background, centered composition, typography is th
         data: { status: TrendDesignStatus.UPSCALING },
       });
 
-      const upscaledUrl = await this.replicate.upscale4x(baseImageUrl);
-      if (!upscaledUrl) throw new Error('Upscale failed');
+      let upscaledUrl = await this.replicate.upscale4x(baseImageUrl);
+      let printQuality: 'hi' | 'lo' = 'hi';
+      if (!upscaledUrl) {
+        this.logger.warn(`Upscale failed for ${trendDesignId}; proceeding with base image as lo-quality`);
+        upscaledUrl = baseImageUrl;
+        printQuality = 'lo';
+      }
 
       await this.prisma.trendDesign.update({
         where: { id: trendDesignId },
@@ -114,13 +119,17 @@ Requirements: transparent PNG background, centered composition, typography is th
       const design = await this.prisma.design.create({
         data: {
           storeId: td.storeId,
-          name: `Trend: ${td.trendItem.keyword.slice(0, 60)}`,
+          name: printQuality === 'lo'
+            ? `[lo-quality] Trend: ${td.trendItem.keyword.slice(0, 60)}`
+            : `Trend: ${td.trendItem.keyword.slice(0, 60)}`,
           fileUrl: finalUrl,
           fileSha256: crypto.createHash('sha256').update(buffer).digest('hex'),
           fileSizeBytes: buffer.length,
           mimeType: 'image/png',
-          width: 4096,
-          height: 4096,
+          // Hi-quality after Real-ESRGAN x4 from 832x1216 ≈ 3328x4864.
+          // Lo-quality fallback uses base 832x1216.
+          width: printQuality === 'hi' ? 3328 : 832,
+          height: printQuality === 'hi' ? 4864 : 1216,
         },
       });
 

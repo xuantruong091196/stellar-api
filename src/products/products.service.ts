@@ -926,6 +926,40 @@ export class ProductsService {
    * Regenerate SEO content for an existing product.
    * Auto-syncs to Shopify if published.
    */
+  /**
+   * Re-enqueue color-variant mockup generation for a product.
+   * Requires a previously-uploaded design-overlay (saved at draft time).
+   */
+  async regenerateMockups(productId: string, callerStoreId: string): Promise<{ enqueued: boolean }> {
+    const product = await this.prisma.merchantProduct.findUnique({
+      where: { id: productId },
+      include: {
+        design: { include: { mockups: true } },
+        providerProduct: true,
+      },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
+    if (!product.providerProduct) {
+      throw new BadRequestException('Product missing providerProduct');
+    }
+    const overlay = product.design?.mockups.find(
+      (m) =>
+        m.productType === product.providerProduct!.productType &&
+        m.variant === 'design-overlay',
+    );
+    if (!overlay) {
+      throw new BadRequestException('No design overlay available — re-save the design first');
+    }
+    await this.mockupQueue.enqueue({
+      designId: product.designId,
+      productType: product.providerProduct.productType,
+      providerProductId: product.providerProductId,
+      designOverlayUrl: overlay.imageUrl,
+    });
+    return { enqueued: true };
+  }
+
   async regenerateSeo(productId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: productId },

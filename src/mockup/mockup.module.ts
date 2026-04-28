@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
 import { MockupService } from './mockup.service';
+import { SamService } from './sam.service';
 
 @Module({
-  providers: [MockupService],
-  exports: [MockupService],
+  providers: [MockupService, SamService],
+  exports: [MockupService, SamService],
 })
 export class MockupModule {}

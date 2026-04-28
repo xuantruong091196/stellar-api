@@ -4,6 +4,8 @@ import * as sharp from 'sharp';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../prisma/prisma.service';
 import { safeImageFetch } from '../common/safe-fetch';
+import { SamService } from './sam.service';
+import type { ProviderProduct, ProviderProductVariant } from '../../generated/prisma';
 
 /**
  * Product template definitions — where to place the design on the product image.
@@ -45,6 +47,7 @@ export class MockupService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly sam: SamService,
   ) {
     const r2AccountId = this.config.get<string>('aws.r2AccountId');
     const accessKeyId = this.config.get<string>('aws.accessKeyId');
@@ -388,6 +391,89 @@ export class MockupService {
       .composite([{ input: overlayResized, blend: 'over' }])
       .jpeg({ quality: 90 })
       .toBuffer();
+  }
+
+  /**
+   * Generate per-color recolored mockups for one (designId, productType).
+   * Looks up SAM mask via SamService (lazy-populated). On SAM-failed
+   * provider products this returns immediately with no Mockup rows
+   * created — UI falls back to editor-export only.
+   */
+  async generateColorVariants(input: {
+    designId: string;
+    productType: string;
+    providerProduct: ProviderProduct & { variants: ProviderProductVariant[] };
+    designOverlayUrl: string;
+  }): Promise<{ generated: number; skipped: number }> {
+    const blanks = input.providerProduct.blankImages as Record<string, string>;
+    const colors = Object.entries(blanks);
+    if (colors.length === 0) return { generated: 0, skipped: 0 };
+
+    const canonicalBlankUrl = colors[0][1];
+    const mask = await this.sam.getOrCreateMask(input.providerProduct);
+    if (!mask) {
+      this.logger.warn(`SAM mask unavailable for ${input.providerProduct.id}; skipping color variants`);
+      return { generated: 0, skipped: colors.length };
+    }
+    // Re-derive the mask's R2 URL by re-reading the row (sam.service set it).
+    const refreshed = await this.prisma.providerProduct.findUnique({
+      where: { id: input.providerProduct.id },
+      select: { shirtMaskUrl: true },
+    });
+    const shirtMaskUrl = refreshed?.shirtMaskUrl && refreshed.shirtMaskUrl !== 'FAILED'
+      ? refreshed.shirtMaskUrl
+      : null;
+    if (!shirtMaskUrl) return { generated: 0, skipped: colors.length };
+
+    const colorHexByName = new Map<string, string>();
+    for (const v of input.providerProduct.variants) {
+      if (v.color && v.colorHex) colorHexByName.set(v.color, v.colorHex);
+    }
+
+    let generated = 0;
+    let skipped = 0;
+    for (const [colorName] of colors) {
+      const colorHex = colorHexByName.get(colorName);
+      if (!colorHex) {
+        this.logger.warn(`No colorHex for ${colorName} on ${input.providerProduct.id}; skipping`);
+        skipped++;
+        continue;
+      }
+      try {
+        const buffer = await this.composeColorVariant({
+          canonicalBlankUrl,
+          shirtMaskUrl,
+          designOverlayUrl: input.designOverlayUrl,
+          colorHex,
+        });
+        const safeColor = colorName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        const key = `mockups/${input.designId}/${input.productType}-${safeColor}.jpg`;
+        const imageUrl = await this.uploadToR2(key, buffer);
+        await this.prisma.mockup.upsert({
+          where: {
+            designId_productType_variant: {
+              designId: input.designId,
+              productType: input.productType,
+              variant: colorName,
+            },
+          },
+          update: { imageUrl },
+          create: {
+            designId: input.designId,
+            productType: input.productType,
+            variant: colorName,
+            imageUrl,
+          },
+        });
+        generated++;
+      } catch (e) {
+        this.logger.error(`Color variant ${colorName} failed for ${input.designId}: ${(e as Error).message}`);
+        skipped++;
+      }
+    }
+
+    this.logger.log(`generateColorVariants ${input.designId}: ${generated} done, ${skipped} skipped`);
+    return { generated, skipped };
   }
 
   /**

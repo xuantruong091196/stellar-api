@@ -477,6 +477,33 @@ export class MockupService {
   }
 
   /**
+   * Worker entry point — fetches providerProduct and delegates to
+   * generateColorVariants. Kept as a thin shim so MockupModule can wire
+   * the BullMQ processor without circular DI.
+   */
+  async runColorVariantsJob(data: {
+    designId: string;
+    productType: string;
+    providerProductId: string;
+    designOverlayUrl: string;
+  }): Promise<void> {
+    const providerProduct = await this.prisma.providerProduct.findUnique({
+      where: { id: data.providerProductId },
+      include: { variants: true },
+    });
+    if (!providerProduct) {
+      this.logger.warn(`runColorVariantsJob: providerProduct ${data.providerProductId} missing`);
+      return;
+    }
+    await this.generateColorVariants({
+      designId: data.designId,
+      productType: data.productType,
+      providerProduct,
+      designOverlayUrl: data.designOverlayUrl,
+    });
+  }
+
+  /**
    * Upload the design-only PNG produced by the editor (with __blank and
    * __printArea hidden). Stored as Mockup variant='design-overlay' so
    * `composeColorVariant` can fetch it later by designId.

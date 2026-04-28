@@ -634,40 +634,9 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    // Auto-generate mockups if missing (async, don't block response)
-    const hasMockups =
-      product.design?.mockups?.some(
-        (m) => m.productType === product.providerProduct?.productType,
-      ) ?? false;
-
-    if (
-      !hasMockups &&
-      product.design?.fileUrl &&
-      product.providerProduct?.blankImages
-    ) {
-      const blanks = product.providerProduct.blankImages as Record<string, string>;
-      if (Object.keys(blanks).length > 0) {
-        this.mockupService
-          .generateProductMockups({
-            designId: product.designId,
-            designUrl: product.design.fileUrl,
-            blankImages: blanks,
-            printConfig: product.printConfig as {
-              printArea: string;
-              x: number;
-              y: number;
-              scale: number;
-              rotation: number;
-            },
-            productType: product.providerProduct.productType,
-          })
-          .catch((err) => {
-            this.logger.error(
-              `Background mockup generation failed for ${productId}: ${(err as Error).message}`,
-            );
-          });
-      }
-    }
+    // Color-variant mockups are now generated at draft-create time via the
+    // BullMQ MockupQueue (see createDraft) — not lazily on detail-page load.
+    // Use POST /products/:id/regenerate-mockups to re-enqueue.
 
     // Sales performance — last 7 days order counts for this product
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);

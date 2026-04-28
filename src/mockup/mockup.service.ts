@@ -324,6 +324,72 @@ export class MockupService {
     return results;
   }
 
+  private targetLuminance(hex: string): number {
+    const n = parseInt(hex.replace('#', ''), 16);
+    const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+
+  private async fetchAsBuffer(url: string): Promise<Buffer> {
+    return safeImageFetch(url);
+  }
+
+  async composeColorVariant(input: {
+    canonicalBlankUrl: string;
+    shirtMaskUrl: string | null;
+    designOverlayUrl: string;
+    colorHex: string;
+  }): Promise<Buffer> {
+    const blank = await this.fetchAsBuffer(input.canonicalBlankUrl);
+    const mask = input.shirtMaskUrl ? await this.fetchAsBuffer(input.shirtMaskUrl) : null;
+    const overlay = await this.fetchAsBuffer(input.designOverlayUrl);
+
+    const blankMeta = await sharp(blank).metadata();
+    const w = blankMeta.width || 1200;
+    const h = blankMeta.height || 1200;
+    const isDarkTarget = this.targetLuminance(input.colorHex) < 96;
+
+    const tintLayer = await sharp({
+      create: { width: w, height: h, channels: 4, background: input.colorHex },
+    }).png().toBuffer();
+
+    let recolored = await sharp(blank)
+      .composite([{ input: tintLayer, blend: 'multiply' }])
+      .png()
+      .toBuffer();
+
+    if (isDarkTarget) {
+      const highlightLayer = await sharp(blank)
+        .greyscale()
+        .linear(0.55, 0)
+        .png()
+        .toBuffer();
+      recolored = await sharp(recolored)
+        .composite([{ input: highlightLayer, blend: 'screen' }])
+        .png()
+        .toBuffer();
+    }
+
+    if (mask) {
+      // Resize mask to blank dims if shape differs.
+      const resizedMask = await sharp(mask).resize(w, h, { fit: 'fill' }).png().toBuffer();
+      const maskApplied = await sharp(recolored)
+        .composite([{ input: resizedMask, blend: 'dest-in' }])
+        .png()
+        .toBuffer();
+      recolored = await sharp(blank)
+        .composite([{ input: maskApplied, blend: 'over' }])
+        .png()
+        .toBuffer();
+    }
+
+    const overlayResized = await sharp(overlay).resize(w, h, { fit: 'fill' }).toBuffer();
+    return sharp(recolored)
+      .composite([{ input: overlayResized, blend: 'over' }])
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  }
+
   /**
    * Upload the design-only PNG produced by the editor (with __blank and
    * __printArea hidden). Stored as Mockup variant='design-overlay' so

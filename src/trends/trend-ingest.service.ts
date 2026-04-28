@@ -43,21 +43,56 @@ export class TrendIngestService {
     this.logger.log('Daily trend ingestion finished');
   }
 
-  async runForNiche(niche: NicheConfig) {
+  @Cron('0 */4 * * *') // every 4 hours
+  async refreshHotNiches(): Promise<void> {
+    // Identify niches with at least 3 high-velocity items (growthVelocity > 50) in last 24h.
+    const hotNiches = await this.prisma.$queryRaw<Array<{ niche: string; score: number }>>`
+      SELECT niche, AVG("growthVelocity") AS score
+      FROM trend_items
+      WHERE "fetchedAt" > now() - interval '24 hours'
+        AND "growthVelocity" > 50
+        AND niche IS NOT NULL
+      GROUP BY niche
+      HAVING COUNT(*) >= 3
+      ORDER BY score DESC
+      LIMIT 5
+    `;
+
+    if (hotNiches.length === 0) {
+      this.logger.log('refreshHotNiches: no hot niches this cycle');
+      return;
+    }
+    this.logger.log(`refreshHotNiches: refreshing ${hotNiches.map((h) => h.niche).join(', ')}`);
+
+    const niches = await this.prisma.niche.findMany({
+      where: { slug: { in: hotNiches.map((h) => h.niche) }, enabled: true },
+    });
+
+    for (const niche of niches) {
+      try {
+        await this.runForNiche(niche, { lightweight: true });
+      } catch (err) {
+        this.logger.warn(`refreshHotNiches ${niche.slug} failed: ${(err as Error).message}`);
+      }
+    }
+    this.logger.log(`refreshHotNiches done: ${hotNiches.length} niches`);
+  }
+
+  async runForNiche(niche: NicheConfig, opts: { lightweight?: boolean } = {}) {
     const start = Date.now();
     const allCandidates: TrendCandidate[] = [];
     const fetchers = [
       this.reddit.fetchForNiche(niche),
       this.twitter.fetchForNiche(niche),
       this.tiktok.fetchForNiche(niche),
-      this.googleTrends.fetchForNiche(niche),
+      ...(opts.lightweight ? [] : [this.googleTrends.fetchForNiche(niche)]),
     ];
     const results = await Promise.allSettled(fetchers);
     for (const r of results) {
       if (r.status === 'fulfilled') allCandidates.push(...r.value);
     }
 
-    const styleRefs = await this.pinterest.fetchStyleRefs(niche.pinterestQuery, 10);
+    const styleRefs = opts.lightweight ? [] : await this.pinterest.fetchStyleRefs(niche.pinterestQuery, 10);
 
     // Layer 1 copyright (blacklist) — drop blocked early
     const survivors = allCandidates.filter((c) => {

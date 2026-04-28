@@ -325,6 +325,46 @@ export class MockupService {
   }
 
   /**
+   * Upload the design-only PNG produced by the editor (with __blank and
+   * __printArea hidden). Stored as Mockup variant='design-overlay' so
+   * `composeColorVariant` can fetch it later by designId.
+   */
+  async uploadDesignOverlay(
+    designId: string,
+    productType: string,
+    dataUrl: string,
+  ): Promise<string> {
+    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
+    if (!match) throw new Error('Invalid data URL format');
+    const buffer = Buffer.from(match[2], 'base64');
+    // Keep PNG — we need the alpha channel for `composite … blend: 'over'`.
+    const optimized = await sharp(buffer).png({ compressionLevel: 9 }).toBuffer();
+
+    const key = `mockups/${designId}/${productType}-design-overlay.png`;
+    const imageUrl = await this.uploadToR2(key, optimized, 'image/png');
+
+    await this.prisma.mockup.upsert({
+      where: {
+        designId_productType_variant: {
+          designId,
+          productType,
+          variant: 'design-overlay',
+        },
+      },
+      update: { imageUrl },
+      create: {
+        designId,
+        productType,
+        variant: 'design-overlay',
+        imageUrl,
+      },
+    });
+
+    this.logger.log(`Design overlay saved for design ${designId}`);
+    return imageUrl;
+  }
+
+  /**
    * Upload an editor-exported mockup (base64 data URL) to R2.
    * Returns the public URL. Used by createDraft to persist the
    * WYSIWYG composite the merchant saw in the editor.

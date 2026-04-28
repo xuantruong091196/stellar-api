@@ -35,7 +35,7 @@ export class SubscriptionController {
 
   @Post('quote')
   async quote(@Body() dto: QuoteDto, @Req() req: any) {
-    return this.priceLock.createQuote(req.storeId, dto.periodMonths, dto.currency);
+    return this.priceLock.createQuote(req.storeId, dto.periodMonths, dto.currency, dto.discountCode);
   }
 
   @Post('checkout')

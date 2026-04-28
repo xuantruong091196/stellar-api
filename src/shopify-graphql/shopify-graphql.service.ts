@@ -561,4 +561,72 @@ export class ShopifyGraphqlService {
 
     return { fulfillmentId: result.fulfillmentCreate.fulfillment!.id };
   }
+
+  /**
+   * Attach an image (already public, e.g. our R2 URL) to one or more
+   * Shopify product variants. Uses `productCreateMedia` to register
+   * the URL as a MediaImage, then `productVariantAppendMedia` to bind
+   * each MediaImage to its variant.
+   */
+  async productVariantAppendMedia(
+    domain: string,
+    accessToken: string,
+    productGid: string,
+    inputs: Array<{ variantId: string; imageUrl: string; altText?: string }>,
+  ): Promise<void> {
+    if (inputs.length === 0) return;
+    const createMutation = `
+      mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+        productCreateMedia(productId: $productId, media: $media) {
+          media { ... on MediaImage { id alt status } }
+          mediaUserErrors { field message }
+        }
+      }
+    `;
+    const created = await this.query<{
+      productCreateMedia: {
+        media: Array<{ id: string }>;
+        mediaUserErrors: Array<{ field: string[]; message: string }>;
+      };
+    }>(domain, accessToken, createMutation, {
+      productId: productGid,
+      media: inputs.map((i) => ({
+        mediaContentType: 'IMAGE',
+        originalSource: i.imageUrl,
+        alt: i.altText ?? '',
+      })),
+    });
+    if (created.productCreateMedia.mediaUserErrors.length > 0) {
+      throw new Error(
+        `productCreateMedia failed: ${created.productCreateMedia.mediaUserErrors.map((e) => e.message).join(', ')}`,
+      );
+    }
+    const mediaIds = created.productCreateMedia.media.map((m) => m.id);
+
+    const mutation = `
+      mutation productVariantAppendMedia($productId: ID!, $variantMedia: [ProductVariantAppendMediaInput!]!) {
+        productVariantAppendMedia(productId: $productId, variantMedia: $variantMedia) {
+          productVariants { id }
+          userErrors { field message }
+        }
+      }
+    `;
+    const result = await this.query<{
+      productVariantAppendMedia: {
+        productVariants: Array<{ id: string }>;
+        userErrors: Array<{ field: string[]; message: string }>;
+      };
+    }>(domain, accessToken, mutation, {
+      productId: productGid,
+      variantMedia: inputs.map((i, idx) => ({
+        variantId: i.variantId,
+        mediaIds: [mediaIds[idx]],
+      })),
+    });
+    if (result.productVariantAppendMedia.userErrors.length > 0) {
+      throw new Error(
+        `productVariantAppendMedia failed: ${result.productVariantAppendMedia.userErrors.map((e) => e.message).join(', ')}`,
+      );
+    }
+  }
 }

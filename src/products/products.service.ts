@@ -427,6 +427,44 @@ export class ProductsService {
         }
       }
 
+      // 4c. Attach per-variant color images (best effort — non-fatal).
+      try {
+        const colorMockups = await this.prisma.mockup.findMany({
+          where: {
+            designId: product.designId,
+            productType: product.providerProduct.productType,
+            variant: { notIn: ['editor-export', 'design-overlay'] },
+          },
+        });
+        const mockupByColor = new Map(colorMockups.map((m) => [m.variant, m.imageUrl]));
+
+        // Pair Shopify variants with mockups by color name. autoVariantIds
+        // are positional (Size order × Color order), same ordering as `variants`.
+        const variantMediaInputs = autoVariantIds
+          .map((variantId, i) => {
+            const color = variants[i]?.color;
+            const imageUrl = color ? mockupByColor.get(color) : undefined;
+            return imageUrl ? { variantId, imageUrl, altText: `${product.title} — ${color}` } : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        if (variantMediaInputs.length > 0) {
+          await this.shopifyGql.productVariantAppendMedia(
+            store.shopifyDomain,
+            accessToken,
+            shopifyProductGid,
+            variantMediaInputs,
+          );
+          this.logger.log(`Attached ${variantMediaInputs.length} per-variant images to ${shopifyProductGid}`);
+        } else {
+          this.logger.log(`No color mockups available for ${merchantProductId}; primary image only`);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Per-variant image attach failed for ${merchantProductId} (non-fatal): ${(err as Error).message}`,
+        );
+      }
+
       // 4b. Publish to Online Store sales channel so customers actually
       // see it on the storefront. `productCreate` alone leaves the
       // product in admin with `publishedOnCurrentPublication = false`;

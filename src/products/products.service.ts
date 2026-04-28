@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { MockupService } from '../mockup/mockup.service';
+import { MockupQueue } from '../mockup/mockup.queue';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
 import { SeoGeneratorService } from '../ai-content/seo-generator.service';
 import { safeImageFetch } from '../common/safe-fetch';
@@ -23,6 +24,7 @@ export class ProductsService {
     private readonly prisma: PrismaService,
     private readonly shopifyGql: ShopifyGraphqlService,
     private readonly mockupService: MockupService,
+    private readonly mockupQueue: MockupQueue,
     private readonly shopifyAuth: ShopifyAuthService,
     private readonly config: ConfigService,
     private readonly seoGenerator: SeoGeneratorService,
@@ -154,6 +156,41 @@ export class ProductsService {
       } catch (err) {
         this.logger.warn(
           `Editor export upload failed for ${product.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Save design-only overlay (used for color-variant compositing).
+    let overlayUrl: string | null = null;
+    if (dto.overlayDataUrl) {
+      try {
+        overlayUrl = await this.mockupService.uploadDesignOverlay(
+          design.id,
+          providerProduct.productType,
+          dto.overlayDataUrl,
+        );
+        this.logger.log(`Design overlay saved for product ${product.id}`);
+      } catch (err) {
+        this.logger.warn(
+          `Design overlay upload failed for ${product.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Kick off color-variant generation in the background.
+    // SAM mask is generated lazily inside the worker (first use only).
+    if (overlayUrl) {
+      try {
+        await this.mockupQueue.enqueue({
+          designId: design.id,
+          productType: providerProduct.productType,
+          providerProductId: providerProduct.id,
+          designOverlayUrl: overlayUrl,
+        });
+        this.logger.log(`Color-variants job queued for product ${product.id}`);
+      } catch (err) {
+        this.logger.warn(
+          `Mockup queue enqueue failed for ${product.id}: ${(err as Error).message}`,
         );
       }
     }

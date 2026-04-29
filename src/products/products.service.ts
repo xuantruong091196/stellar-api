@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { MockupService } from '../mockup/mockup.service';
+import { MockupQueue } from '../mockup/mockup.queue';
 import { ShopifyAuthService } from '../auth/shopify-auth.service';
 import { SeoGeneratorService } from '../ai-content/seo-generator.service';
 import { safeImageFetch } from '../common/safe-fetch';
@@ -23,6 +24,7 @@ export class ProductsService {
     private readonly prisma: PrismaService,
     private readonly shopifyGql: ShopifyGraphqlService,
     private readonly mockupService: MockupService,
+    private readonly mockupQueue: MockupQueue,
     private readonly shopifyAuth: ShopifyAuthService,
     private readonly config: ConfigService,
     private readonly seoGenerator: SeoGeneratorService,
@@ -154,6 +156,41 @@ export class ProductsService {
       } catch (err) {
         this.logger.warn(
           `Editor export upload failed for ${product.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Save design-only overlay (used for color-variant compositing).
+    let overlayUrl: string | null = null;
+    if (dto.overlayDataUrl) {
+      try {
+        overlayUrl = await this.mockupService.uploadDesignOverlay(
+          design.id,
+          providerProduct.productType,
+          dto.overlayDataUrl,
+        );
+        this.logger.log(`Design overlay saved for product ${product.id}`);
+      } catch (err) {
+        this.logger.warn(
+          `Design overlay upload failed for ${product.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Kick off color-variant generation in the background.
+    // SAM mask is generated lazily inside the worker (first use only).
+    if (overlayUrl) {
+      try {
+        await this.mockupQueue.enqueue({
+          designId: design.id,
+          productType: providerProduct.productType,
+          providerProductId: providerProduct.id,
+          designOverlayUrl: overlayUrl,
+        });
+        this.logger.log(`Color-variants job queued for product ${product.id}`);
+      } catch (err) {
+        this.logger.warn(
+          `Mockup queue enqueue failed for ${product.id}: ${(err as Error).message}`,
         );
       }
     }
@@ -390,6 +427,44 @@ export class ProductsService {
         }
       }
 
+      // 4c. Attach per-variant color images (best effort — non-fatal).
+      try {
+        const colorMockups = await this.prisma.mockup.findMany({
+          where: {
+            designId: product.designId,
+            productType: product.providerProduct.productType,
+            variant: { notIn: ['editor-export', 'design-overlay'] },
+          },
+        });
+        const mockupByColor = new Map(colorMockups.map((m) => [m.variant, m.imageUrl]));
+
+        // Pair Shopify variants with mockups by color name. autoVariantIds
+        // are positional (Size order × Color order), same ordering as `variants`.
+        const variantMediaInputs = autoVariantIds
+          .map((variantId, i) => {
+            const color = variants[i]?.color;
+            const imageUrl = color ? mockupByColor.get(color) : undefined;
+            return imageUrl ? { variantId, imageUrl, altText: `${product.title} — ${color}` } : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        if (variantMediaInputs.length > 0) {
+          await this.shopifyGql.productVariantAppendMedia(
+            store.shopifyDomain,
+            accessToken,
+            shopifyProductGid,
+            variantMediaInputs,
+          );
+          this.logger.log(`Attached ${variantMediaInputs.length} per-variant images to ${shopifyProductGid}`);
+        } else {
+          this.logger.log(`No color mockups available for ${merchantProductId}; primary image only`);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Per-variant image attach failed for ${merchantProductId} (non-fatal): ${(err as Error).message}`,
+        );
+      }
+
       // 4b. Publish to Online Store sales channel so customers actually
       // see it on the storefront. `productCreate` alone leaves the
       // product in admin with `publishedOnCurrentPublication = false`;
@@ -559,40 +634,9 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    // Auto-generate mockups if missing (async, don't block response)
-    const hasMockups =
-      product.design?.mockups?.some(
-        (m) => m.productType === product.providerProduct?.productType,
-      ) ?? false;
-
-    if (
-      !hasMockups &&
-      product.design?.fileUrl &&
-      product.providerProduct?.blankImages
-    ) {
-      const blanks = product.providerProduct.blankImages as Record<string, string>;
-      if (Object.keys(blanks).length > 0) {
-        this.mockupService
-          .generateProductMockups({
-            designId: product.designId,
-            designUrl: product.design.fileUrl,
-            blankImages: blanks,
-            printConfig: product.printConfig as {
-              printArea: string;
-              x: number;
-              y: number;
-              scale: number;
-              rotation: number;
-            },
-            productType: product.providerProduct.productType,
-          })
-          .catch((err) => {
-            this.logger.error(
-              `Background mockup generation failed for ${productId}: ${(err as Error).message}`,
-            );
-          });
-      }
-    }
+    // Color-variant mockups are now generated at draft-create time via the
+    // BullMQ MockupQueue (see createDraft) — not lazily on detail-page load.
+    // Use POST /products/:id/regenerate-mockups to re-enqueue.
 
     // Sales performance — last 7 days order counts for this product
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -851,6 +895,40 @@ export class ProductsService {
    * Regenerate SEO content for an existing product.
    * Auto-syncs to Shopify if published.
    */
+  /**
+   * Re-enqueue color-variant mockup generation for a product.
+   * Requires a previously-uploaded design-overlay (saved at draft time).
+   */
+  async regenerateMockups(productId: string, callerStoreId: string): Promise<{ enqueued: boolean }> {
+    const product = await this.prisma.merchantProduct.findUnique({
+      where: { id: productId },
+      include: {
+        design: { include: { mockups: true } },
+        providerProduct: true,
+      },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+    if (product.storeId !== callerStoreId) throw new ForbiddenException();
+    if (!product.providerProduct) {
+      throw new BadRequestException('Product missing providerProduct');
+    }
+    const overlay = product.design?.mockups.find(
+      (m) =>
+        m.productType === product.providerProduct!.productType &&
+        m.variant === 'design-overlay',
+    );
+    if (!overlay) {
+      throw new BadRequestException('No design overlay available — re-save the design first');
+    }
+    await this.mockupQueue.enqueue({
+      designId: product.designId,
+      productType: product.providerProduct.productType,
+      providerProductId: product.providerProductId,
+      designOverlayUrl: overlay.imageUrl,
+    });
+    return { enqueued: true };
+  }
+
   async regenerateSeo(productId: string, callerStoreId: string) {
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: productId },

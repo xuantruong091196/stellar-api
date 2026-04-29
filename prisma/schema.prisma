@@ -355,6 +355,9 @@ model ProviderProduct {
   name           String // "Bella+Canvas 3001 Unisex Jersey Tee"
   brand          String?
   description    String?
+  // R2 URL of cached SAM shirt mask, or "FAILED" sentinel.
+  // Lazy-populated on first new-pipeline use of this provider product.
+  shirtMaskUrl   String?
   baseCost       Float // USD base cost per unit
   printAreas     Json // [{ name: "front", widthPx: 4200, heightPx: 4800, dpi: 300 }, { name: "back", widthPx: 4200, heightPx: 4800, dpi: 300 }]
   blankImages    Json // { "Black": "https://...", "White": "https://..." }

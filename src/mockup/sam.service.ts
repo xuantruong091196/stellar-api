@@ -125,6 +125,59 @@ export class SamService {
     return await sharp(bestMask).greyscale().png().toBuffer();
   }
 
+  /**
+   * Run SAM-2 in automatic mode and return the most-specific mask whose
+   * foreground covers (px, py). "Most-specific" = smallest mask area among
+   * masks that contain the click point — picks the inner object instead of
+   * a larger surrounding region.
+   *
+   * `px`/`py` are pixel coordinates in the original image's coordinate
+   * space (top-left origin). Returns a single-channel greyscale PNG where
+   * white = inside object.
+   */
+  async extractMaskAtPoint(imageUrl: string, px: number, py: number): Promise<Buffer | null> {
+    if (!this.replicate) {
+      this.logger.warn('Replicate not configured; cannot extract mask at point');
+      return null;
+    }
+    const output = (await this.replicate.run(
+      'meta/sam-2:fe97b453a6455861e3bac769b441ca1f1086110da7466dbb65cf1eecfd60dc83',
+      { input: { image: imageUrl, points_per_side: 32, pred_iou_thresh: 0.86 } },
+    )) as { individual_masks?: string[] } | string[];
+    const maskUrls = Array.isArray(output) ? output : (output.individual_masks ?? []);
+    if (maskUrls.length === 0) return null;
+
+    let bestMask: Buffer | null = null;
+    let bestArea = Infinity;
+
+    for (const url of maskUrls) {
+      const buf = await safeImageFetch(url);
+      const { data, info } = await sharp(buf)
+        .greyscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const ix = Math.max(0, Math.min(info.width - 1, Math.round(px)));
+      const iy = Math.max(0, Math.min(info.height - 1, Math.round(py)));
+      const idx = iy * info.width + ix;
+      if (data[idx] <= 127) continue; // click point not in this mask
+
+      let fg = 0;
+      for (let i = 0; i < data.length; i++) if (data[i] > 127) fg++;
+      if (fg === 0) continue;
+      // Prefer smaller masks (more specific objects) but reject masks that
+      // are tiny noise (< 0.1% of image area).
+      const totalPx = info.width * info.height;
+      if (fg / totalPx < 0.001) continue;
+      if (fg < bestArea) {
+        bestArea = fg;
+        bestMask = buf;
+      }
+    }
+
+    if (!bestMask) return null;
+    return await sharp(bestMask).greyscale().png().toBuffer();
+  }
+
   private async fetchMaskBuffer(url: string): Promise<Buffer> {
     return safeImageFetch(url);
   }

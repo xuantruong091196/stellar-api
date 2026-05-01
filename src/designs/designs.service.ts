@@ -9,6 +9,8 @@ import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { S3Service } from '../common/services/s3.service';
+import { SamService } from '../mockup/sam.service';
+import { safeImageFetch } from '../common/safe-fetch';
 
 /** Maximum allowed width/height for any dimension of an uploaded image. */
 const MAX_IMAGE_DIMENSION = 20000;
@@ -23,6 +25,7 @@ export class DesignsService {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly s3: S3Service,
+    private readonly sam: SamService,
   ) {}
 
   /**
@@ -202,6 +205,114 @@ export class DesignsService {
         totalPages: Math.ceil(total / limit),
       },
     };
+  }
+
+  /**
+   * Extract one Photoshop-style "layer" from a design at the given click
+   * coordinates. Runs SAM-2 on the source image, picks the most-specific
+   * mask containing (px, py), then produces:
+   *
+   *   - layerUrl: PNG of the masked region only (transparent elsewhere).
+   *     Cropped to the mask's bounding box for smaller payload.
+   *   - punchedUrl: copy of the source image with the masked region erased
+   *     (set to transparent). The user's editor swaps the source image
+   *     with this so successive extracts compound naturally.
+   *   - bbox: position + size of the layer in the original image's pixel
+   *     space. The frontend uses this to position the layer Fabric object.
+   *
+   * `sourceUrl` is the URL the editor is currently displaying — usually
+   * the design's original `fileUrl`, but after the first extract the
+   * editor sends back the previous `punchedUrl` so layers chain.
+   * Restricted to our R2 public URL prefix to prevent SSRF abuse via the
+   * downstream SAM call.
+   */
+  async extractLayer(
+    designId: string,
+    callerStoreId: string,
+    input: { sourceUrl: string; px: number; py: number },
+  ): Promise<{
+    layerUrl: string;
+    punchedUrl: string;
+    bbox: { x: number; y: number; width: number; height: number };
+  }> {
+    const design = await this.prisma.design.findUnique({ where: { id: designId } });
+    if (!design) throw new NotFoundException('Design not found');
+    if (design.storeId !== callerStoreId) throw new NotFoundException('Design not found');
+
+    const r2Prefix = process.env.R2_PUBLIC_URL || '';
+    if (!r2Prefix || !input.sourceUrl.startsWith(r2Prefix)) {
+      throw new BadRequestException('sourceUrl must be a managed R2 asset');
+    }
+
+    const mask = await this.sam.extractMaskAtPoint(input.sourceUrl, input.px, input.py);
+    if (!mask) {
+      throw new BadRequestException('No object detected at this point');
+    }
+
+    const sourceBuffer = await safeImageFetch(input.sourceUrl);
+    const sourceMeta = await sharp(sourceBuffer).metadata();
+    const w = sourceMeta.width || 1;
+    const h = sourceMeta.height || 1;
+
+    const resizedMask = await sharp(mask).resize(w, h, { fit: 'fill' }).png().toBuffer();
+
+    // Layer = source AND mask. Composite mask as alpha via dest-in.
+    const layerFull = await sharp(sourceBuffer)
+      .ensureAlpha()
+      .composite([{ input: resizedMask, blend: 'dest-in' }])
+      .png()
+      .toBuffer();
+
+    // Trim transparent borders so the layer is just the object's bbox.
+    // Sharp's trim() strips borders matching the top-left pixel — for a
+    // transparent-bordered PNG that gives us the tight crop we want.
+    const trimmed = await sharp(layerFull).trim().toBuffer();
+    const trimmedMeta = await sharp(trimmed).metadata();
+
+    // Compute the bbox by scanning the resized mask for foreground pixels.
+    // sharp's trim() doesn't give us the offset directly, so we measure
+    // independently — the offsets must agree with the trimmed PNG dims.
+    const { data: maskData, info: maskInfo } = await sharp(resizedMask)
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let minX = maskInfo.width, minY = maskInfo.height, maxX = -1, maxY = -1;
+    for (let y = 0; y < maskInfo.height; y++) {
+      for (let x = 0; x < maskInfo.width; x++) {
+        if (maskData[y * maskInfo.width + x] > 127) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    const bbox = {
+      x: minX,
+      y: minY,
+      width: Math.max(1, maxX - minX + 1),
+      height: Math.max(1, maxY - minY + 1),
+    };
+
+    // Punched original = source minus mask region (mask region → transparent).
+    // Invert mask so masked region is BLACK (alpha 0 after dest-in).
+    const invertedMask = await sharp(resizedMask).negate({ alpha: false }).toBuffer();
+    const punched = await sharp(sourceBuffer)
+      .ensureAlpha()
+      .composite([{ input: invertedMask, blend: 'dest-in' }])
+      .png()
+      .toBuffer();
+
+    const ts = Date.now();
+    const layerKey = `designs/${designId}/layers/${ts}.png`;
+    const punchedKey = `designs/${designId}/punched-${ts}.png`;
+    const layerUrl = await this.s3.uploadFile(layerKey, trimmed, 'image/png');
+    const punchedUrl = await this.s3.uploadFile(punchedKey, punched, 'image/png');
+
+    this.logger.log(
+      `extractLayer ${designId}: layer ${trimmedMeta.width}x${trimmedMeta.height} at (${bbox.x},${bbox.y})`,
+    );
+    return { layerUrl, punchedUrl, bbox };
   }
 
   /**

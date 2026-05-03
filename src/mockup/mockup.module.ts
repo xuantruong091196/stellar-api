@@ -5,7 +5,7 @@ import { MockupQueue } from './mockup.queue';
 
 @Module({
   providers: [SamService, MockupService, MockupQueue],
-  exports: [MockupService, MockupQueue],
+  exports: [MockupService, MockupQueue, SamService],
 })
 export class MockupModule implements OnModuleInit {
   constructor(

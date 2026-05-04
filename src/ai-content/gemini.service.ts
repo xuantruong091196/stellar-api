@@ -65,4 +65,30 @@ export class GeminiService {
       return null;
     }
   }
+
+  /**
+   * Edit an existing image with a natural-language instruction.
+   * Powers ai-remove-bg, ai-enhance, and any other "transform this image"
+   * tool — Gemini accepts a base64 image + text prompt as multimodal
+   * input and returns a new image inline.
+   */
+  async editImage(imageBase64: string, instruction: string): Promise<string | null> {
+    if (!this.client) return null;
+    try {
+      const model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
+      // Strip the data: URL prefix if present — the SDK expects raw base64.
+      const base64 = imageBase64.replace(/^data:image\/[^;]+;base64,/, '');
+      const result = await model.generateContent([
+        { inlineData: { data: base64, mimeType: 'image/png' } },
+        { text: instruction },
+      ]);
+      const parts = result.response.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));
+      if (!imagePart || !imagePart.inlineData) return null;
+      return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
+    } catch (err) {
+      this.logger.warn(`Image edit failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
 }

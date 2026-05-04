@@ -1,8 +1,9 @@
 import { Controller, Get, Post, Query, Param, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import * as sharp from 'sharp';
 import { Public } from '../auth/decorators/public.decorator';
 import { FreepikSource } from './freepik.source';
-import { AiEnhanceService } from './ai-enhance.service';
+import { GeminiService } from '../ai-content/gemini.service';
 import { safeImageFetchWithContentType } from '../common/safe-fetch';
 import {
   AiRemoveBgDto,
@@ -16,8 +17,14 @@ const FREEPIK_API_KEY = process.env.FREEPIK_API_KEY || '';
 @ApiTags('clipart')
 @Controller('clipart')
 export class ClipartController {
+  // Freepik resources/clipart still works on the standard plan key, so we
+  // keep search + download on Freepik. The AI endpoints (enhance, remove
+  // BG, generate, upscale) used to call Freepik beta but the key has no
+  // Magnific AI access — every call returned 503/500. Replaced with
+  // Gemini for image gen/edit and Sharp for upscale (no external API).
   private readonly freepik = new FreepikSource(FREEPIK_API_KEY);
-  private readonly aiEnhanceService = new AiEnhanceService();
+
+  constructor(private readonly gemini: GeminiService) {}
 
   @Public()
   @Get('search')
@@ -52,61 +59,52 @@ export class ClipartController {
 
   @Post('ai-enhance')
   @ApiOperation({
-    summary: 'AI-enhance a draft design using Freepik Reimagine',
+    summary: 'AI-enhance an image via Gemini image edit',
     description:
-      'Sends the canvas export (base64 PNG) to Freepik AI for professional re-rendering. ' +
-      'Optionally upscales the result to 2x or 4x for print quality.',
+      'Sends the canvas image (base64 PNG) to Gemini with an "enhance" instruction — sharper, more vibrant, higher contrast. Returns a new base64 PNG.',
   })
   async aiEnhance(@Body() dto: AiEnhanceDto) {
-    if (!FREEPIK_API_KEY) {
-      return { error: 'Freepik API key not configured' };
+    if (!this.gemini.isEnabled()) {
+      return { error: 'Gemini API key not configured' };
     }
-    return this.aiEnhanceService.enhance(dto);
+    try {
+      const promptHint = (dto.prompt || '').slice(0, 200);
+      const instruction =
+        `Enhance this image for print-on-demand: increase sharpness, contrast, ` +
+        `and color vibrancy while keeping the exact same composition and subject. ` +
+        `Do not add new elements. Return a clean, high-quality PNG.` +
+        (promptHint ? ` Additional guidance: ${promptHint}` : '');
+      const out = await this.gemini.editImage(dto.imageBase64, instruction);
+      if (!out) throw new Error('No image returned');
+      return { imageUrl: out };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Enhance failed' };
+    }
   }
 
   @Post('ai-remove-bg')
-  @ApiOperation({ summary: 'Remove background from an image' })
+  @ApiOperation({ summary: 'Remove background via Gemini image edit' })
   async aiRemoveBg(@Body() dto: AiRemoveBgDto) {
-    if (!FREEPIK_API_KEY) {
-      return { error: 'Freepik API key not configured' };
+    if (!this.gemini.isEnabled()) {
+      return { error: 'Gemini API key not configured' };
     }
     try {
-      const res = await fetch(`https://api.freepik.com/v1/ai/beta/image/remove-background`, {
-        method: 'POST',
-        headers: {
-          'x-freepik-api-key': FREEPIK_API_KEY,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({ image: dto.imageBase64 }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Remove BG failed: ${res.status} ${body}`);
-      }
-
-      const data = await res.json() as { data: { generated?: string[]; task_id?: string; status?: string } };
-      let imageUrl = data.data?.generated?.[0] || '';
-
-      if (!imageUrl && data.data?.task_id) {
-        imageUrl = await this.pollFreepikTask(data.data.task_id, 'image/remove-background');
-      }
-
-      if (!imageUrl) throw new Error('No image returned');
-
-      const proxied = await this.proxyToBase64(imageUrl);
-      return { imageUrl: proxied };
+      const out = await this.gemini.editImage(
+        dto.imageBase64,
+        'Remove the background from this image entirely. Output ONLY the foreground subject on a fully transparent background. Keep the subject intact, preserve all detail and edges. Return as a transparent PNG.',
+      );
+      if (!out) throw new Error('No image returned');
+      return { imageUrl: out };
     } catch (err) {
       return { error: err instanceof Error ? err.message : 'Remove BG failed' };
     }
   }
 
   @Post('ai-generate')
-  @ApiOperation({ summary: 'Generate image from text prompt' })
+  @ApiOperation({ summary: 'Generate image from text prompt via Gemini' })
   async aiGenerate(@Body() dto: AiGenerateDto) {
-    if (!FREEPIK_API_KEY) {
-      return { error: 'Freepik API key not configured' };
+    if (!this.gemini.isEnabled()) {
+      return { error: 'Gemini API key not configured' };
     }
 
     const styleSuffixes: Record<string, string> = {
@@ -125,38 +123,11 @@ export class ClipartController {
 
     const styleSuffix = styleSuffixes[dto.style || ''] || styleSuffixes['pod-ready'];
     const bgNote = dto.transparentBg ? ', transparent background, PNG' : ', white background';
-    const sanitized = (cleanPrompt + styleSuffix + bgNote).slice(0, 500);
+    const aspectNote = dto.aspectRatio === 'portrait' ? ', portrait 3:4 aspect ratio' : ', square 1:1 aspect ratio';
+    const sanitized = (cleanPrompt + styleSuffix + bgNote + aspectNote).slice(0, 600);
 
     try {
-      const res = await fetch(`https://api.freepik.com/v1/ai/text-to-image`, {
-        method: 'POST',
-        headers: {
-          'x-freepik-api-key': FREEPIK_API_KEY,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: sanitized,
-          num_images: 1,
-          image: { size: dto.aspectRatio === 'portrait' ? 'portrait_3_4' : 'square_1_1' },
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Generate failed: ${res.status} ${body}`);
-      }
-
-      const data = await res.json() as { data: Array<{ base64?: string; url?: string }> };
-      const first = data.data?.[0];
-      let imageUrl = '';
-
-      if (first?.base64) {
-        imageUrl = `data:image/png;base64,${first.base64}`;
-      } else if (first?.url) {
-        imageUrl = await this.proxyToBase64(first.url);
-      }
-
+      const imageUrl = await this.gemini.generateImage(sanitized);
       if (!imageUrl) throw new Error('No image generated');
       return { imageUrl, width: 0, height: 0 };
     } catch (err) {
@@ -165,59 +136,24 @@ export class ClipartController {
   }
 
   @Post('ai-upscale')
-  @ApiOperation({ summary: 'Upscale an image' })
+  @ApiOperation({ summary: 'Upscale an image via Sharp lanczos3' })
   async aiUpscale(@Body() dto: AiUpscaleDto) {
-    if (!FREEPIK_API_KEY) {
-      return { error: 'Freepik API key not configured' };
-    }
     try {
-      const res = await fetch(`https://api.freepik.com/v1/ai/beta/image/upscale`, {
-        method: 'POST',
-        headers: {
-          'x-freepik-api-key': FREEPIK_API_KEY,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          image: dto.imageBase64,
-          scale: dto.scale === '4x' ? 4 : 2,
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Upscale failed: ${res.status} ${body}`);
-      }
-
-      const data = await res.json() as { data: { generated?: string[]; task_id?: string; status?: string } };
-      let imageUrl = data.data?.generated?.[0] || '';
-
-      if (!imageUrl && data.data?.task_id) {
-        imageUrl = await this.pollFreepikTask(data.data.task_id, 'image/upscale');
-      }
-
-      if (!imageUrl) throw new Error('No image returned');
-
-      const proxied = await this.proxyToBase64(imageUrl);
-      return { imageUrl: proxied, width: 0, height: 0 };
+      const base64 = dto.imageBase64.replace(/^data:image\/[^;]+;base64,/, '');
+      const inputBuffer = Buffer.from(base64, 'base64');
+      const meta = await sharp(inputBuffer).metadata();
+      const w = meta.width || 1024;
+      const h = meta.height || 1024;
+      const scale = dto.scale === '4x' ? 4 : 2;
+      const upscaled = await sharp(inputBuffer)
+        .resize(w * scale, h * scale, { kernel: 'lanczos3' })
+        .png({ compressionLevel: 6 })
+        .toBuffer();
+      const imageUrl = `data:image/png;base64,${upscaled.toString('base64')}`;
+      return { imageUrl, width: w * scale, height: h * scale };
     } catch (err) {
       return { error: err instanceof Error ? err.message : 'Upscale failed' };
     }
-  }
-
-  // Shared helpers for the new endpoints
-  private async pollFreepikTask(taskId: string, endpoint: string, maxAttempts = 30): Promise<string> {
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch(`https://api.freepik.com/v1/ai/beta/${endpoint}/${taskId}`, {
-        headers: { 'x-freepik-api-key': FREEPIK_API_KEY, Accept: 'application/json' },
-      });
-      if (!res.ok) continue;
-      const data = await res.json() as { data: { generated?: string[]; status?: string } };
-      if (data.data?.status === 'COMPLETED' && data.data?.generated?.[0]) return data.data.generated[0];
-      if (data.data?.status === 'FAILED') throw new Error('AI task failed');
-    }
-    throw new Error('AI task timed out');
   }
 
   private async proxyToBase64(url: string): Promise<string> {

@@ -54,7 +54,7 @@ export class GeminiService {
   async generateImage(prompt: string): Promise<string | null> {
     if (!this.client) return null;
     try {
-      const model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash-image-preview' });
+      const model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
       const result = await model.generateContent(prompt);
       const parts = result.response.candidates?.[0]?.content?.parts || [];
       const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));

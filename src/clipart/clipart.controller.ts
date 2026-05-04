@@ -59,21 +59,44 @@ export class ClipartController {
 
   @Post('ai-enhance')
   @ApiOperation({
-    summary: 'AI-enhance an image via Gemini image edit',
+    summary: 'AI-enhance a design via Gemini image edit',
     description:
-      'Sends the canvas image (base64 PNG) to Gemini with an "enhance" instruction — sharper, more vibrant, higher contrast. Returns a new base64 PNG.',
+      'Treats the input as a draft POD design and polishes it: typography, hierarchy, composition, color palette. Strength 0-1 controls how aggressive the redesign is. Optional user prompt steers style direction.',
   })
   async aiEnhance(@Body() dto: AiEnhanceDto) {
     if (!this.gemini.isEnabled()) {
       return { error: 'Gemini API key not configured' };
     }
     try {
-      const promptHint = (dto.prompt || '').slice(0, 200);
-      const instruction =
-        `Enhance this image for print-on-demand: increase sharpness, contrast, ` +
-        `and color vibrancy while keeping the exact same composition and subject. ` +
-        `Do not add new elements. Return a clean, high-quality PNG.` +
-        (promptHint ? ` Additional guidance: ${promptHint}` : '');
+      const userDirection = (dto.prompt || '').slice(0, 200).trim();
+      const strengthPct = Math.round(((dto.strength ?? 0.3) * 100));
+      const strengthGuidance =
+        strengthPct < 30
+          ? 'SUBTLE polish only — fix obvious flaws (tight kerning, muddy colors, awkward spacing) without redesigning. Result must look almost identical to the input, just cleaner.'
+          : strengthPct < 60
+            ? 'MODERATE refinement — improve typography, hierarchy, and color palette. Keep the same overall layout and concept, just make it more professional.'
+            : 'AGGRESSIVE redesign — re-imagine the layout and aesthetic for maximum visual impact. Preserve the subject/message but feel free to restructure composition, swap fonts, and choose a fresh palette.';
+
+      const instruction = [
+        'You are a senior print-on-demand graphic designer. The input is a draft design from a non-designer user. Polish it into a professional, sellable POD design while preserving the user\'s intent (subject, message, words).',
+        '',
+        'Apply these design principles:',
+        '- Typography: use clean, contemporary typefaces. Establish clear visual hierarchy via size/weight contrast. Tighten kerning. Avoid awkward letter spacing.',
+        '- Composition: improve balance and proportion. Use intentional white space. Align elements purposefully on a grid.',
+        '- Color: choose a cohesive 2-4 color palette suited to the mood. Increase contrast where it helps readability. Avoid muddy mid-tones and clashing hues.',
+        '- Style: lean into a clean, modern POD aesthetic — high-contrast, print-ready, geometric where appropriate.',
+        '- Cleanup: remove visual noise, awkward overlaps, jagged edges, and any artifacts.',
+        '',
+        'Hard constraints:',
+        '- DO NOT change the subject, message, or wording (text content stays exactly the same).',
+        '- DO NOT add unrelated new objects or icons unless the user direction explicitly asks for them.',
+        '- Preserve transparency: if the input has a transparent background, keep it transparent.',
+        '- Output a clean PNG ready to print on apparel/posters/mugs.',
+        '',
+        `Revision strength: ${strengthPct}%. ${strengthGuidance}`,
+        userDirection ? `\nUser direction: ${userDirection}` : '',
+      ].join('\n');
+
       const out = await this.gemini.editImage(dto.imageBase64, instruction);
       if (!out) throw new Error('No image returned');
       return { imageUrl: out };

@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
@@ -24,6 +25,7 @@ export class DesignsService {
     private readonly prisma: PrismaService,
     private readonly s3: S3Service,
     private readonly provenance: DesignProvenanceService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -144,8 +146,9 @@ export class DesignsService {
 
     this.logger.log(`Design created: ${design.id}`);
 
-    // 6. Enqueue provenance mint. Placed AFTER prisma.design.create commits so
-    //    the rollback (delete) runs in a separate transaction — this is intentional.
+    // 6. Enqueue provenance mint (gated by feature flag FEATURE_PROVENANCE_MINT).
+    //    Placed AFTER prisma.design.create commits so the rollback (delete) runs
+    //    in a separate transaction — this is intentional.
     //    On ConflictException we roll back the DB row and re-throw so the caller
     //    gets a 409. On other errors we log a warning and continue; the design is
     //    usable and the merchant can retry the mint via the provenance API later.
@@ -153,18 +156,20 @@ export class DesignsService {
     //    (fileUrl, thumbnailUrl) uploaded in steps 2–3 are NOT cleaned up in this
     //    pass — a follow-up task should call s3.deleteFile for both keys before
     //    throwing, to avoid orphaned R2 objects.
-    try {
-      await this.provenance.enqueueMint(design.id);
-    } catch (err) {
-      if (err instanceof ConflictException) {
-        // Roll back the design row so no orphan Design records exist.
-        await this.prisma.design.delete({ where: { id: design.id } });
-        throw err;
+    if (this.config.get<boolean>('features.provenanceMint')) {
+      try {
+        await this.provenance.enqueueMint(design.id);
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          // Roll back the design row so no orphan Design records exist.
+          await this.prisma.design.delete({ where: { id: design.id } });
+          throw err;
+        }
+        // Non-conflict errors: log and continue. Design stays usable.
+        this.logger.warn(
+          `Provenance mint enqueue failed for ${design.id}: ${(err as Error).message}`,
+        );
       }
-      // Non-conflict errors: log and continue. Design stays usable.
-      this.logger.warn(
-        `Provenance mint enqueue failed for ${design.id}: ${(err as Error).message}`,
-      );
     }
 
     return design;

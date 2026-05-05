@@ -124,6 +124,10 @@ export default () => ({
     pythonBinary: process.env.PYTHON_BINARY || 'python3',
   },
 
+  features: {
+    provenanceMint: process.env.FEATURE_PROVENANCE_MINT === 'true',
+  },
+
   subscription: {
     treasuryStellarAddress: process.env.TREASURY_STELLAR_ADDRESS,
     pricingUsdc: {

@@ -899,17 +899,33 @@ export class OrdersService {
       // Owner-preview bypass: store's own wallet always passes for their products
       if (store.walletAddress && store.walletAddress === buyerWallet) continue;
 
-      const result =
-        g.assetType === 'CLASSIC'
-          ? await this.balanceChecker.checkClassic(
-              buyerWallet,
-              g.assetCode,
-              g.issuerAddress,
-            )
-          : await this.balanceChecker.checkSorobanSac(
-              buyerWallet,
-              g.issuerAddress,
-            );
+      // Distinguish "balance < min" (legitimate cancel) from "verification
+      // unavailable" (Horizon/Soroban outage). The /gating/check endpoint is
+      // fail-closed (block purchase) on 503 — but at the webhook level, letting
+      // the 503 bubble out causes Shopify to retry the webhook up to 19 times
+      // over 48 hours, multiplying load on a degraded Horizon. Soft-pass with
+      // an audit log instead so the order proceeds and ops can review.
+      let result: { balance: string; ledger: number };
+      try {
+        result =
+          g.assetType === 'CLASSIC'
+            ? await this.balanceChecker.checkClassic(
+                buyerWallet,
+                g.assetCode,
+                g.issuerAddress,
+              )
+            : await this.balanceChecker.checkSorobanSac(
+                buyerWallet,
+                g.issuerAddress,
+              );
+      } catch (err: any) {
+        this.logger.warn(
+          `Gating verification unavailable for order ${shopifyOrderId} ` +
+            `(product ${mp.id}, asset ${g.assetCode}): ${err.message}. ` +
+            `Soft-passing to avoid Shopify webhook retry storm.`,
+        );
+        continue; // soft-pass this item; ops can review via logs
+      }
       if (!this.balanceChecker.compare(result.balance, g.minBalance)) {
         await this.cancelGatedOrder(
           store,

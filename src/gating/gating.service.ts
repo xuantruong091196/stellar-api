@@ -1,4 +1,9 @@
-import { Injectable, ForbiddenException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  ForbiddenException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { UpsertGatingDto } from './dto/upsert-gating.dto';
@@ -13,6 +18,16 @@ export class GatingService {
   ) {}
 
   async upsert(storeId: string, dto: UpsertGatingDto) {
+    // Soroban SAC path is stubbed (BalanceCheckerService.checkSorobanSac throws
+    // until Soroban RPC is wired up). Reject SOROBAN_SAC at config time so
+    // merchants don't ship a gate that always 503s. Remove this guard when the
+    // simulateContractCall stub in StellarService is replaced.
+    if (dto.assetType === 'SOROBAN_SAC') {
+      throw new BadRequestException(
+        'Soroban SAC gating is not yet supported. Use CLASSIC asset type for now.',
+      );
+    }
+
     const product = await this.prisma.merchantProduct.findUnique({
       where: { id: dto.merchantProductId },
       include: { store: true },

@@ -3,6 +3,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
 import rateLimit from 'express-rate-limit';
+import * as cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
@@ -74,6 +75,11 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     rawBody: true, // needed for Shopify HMAC verification
   });
+
+  // Cookie parser — must be registered before any guard that reads req.cookies.
+  // BuyerSessionGuard reads the `stelo_buyer_session` HttpOnly cookie; without
+  // this middleware req.cookies is undefined and every buyer request gets 401.
+  app.use(cookieParser());
 
   // Trust the reverse proxy (Docker network, nginx, ALB, etc.) so
   // `express-rate-limit` and any IP-based logic sees the real client IP

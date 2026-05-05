@@ -23,6 +23,13 @@ import { ChallengeDto, VerifyDto } from './dto/buyer-challenge.dto';
 
 const BUYER_COOKIE = 'stelo_buyer_session';
 
+// TODO: rate-limit storefront-facing routes once @nestjs/throttler is wired
+// project-wide (tracked alongside the same dependency for /provenance:designId).
+// Required limits (Plan C Task 8):
+//   - GET  /gating/check                       → 10 req/min/IP
+//   - POST /gating/buyer-siws/challenge        →  5 req/min/IP
+// Apply via @Throttle({ default: { limit: N, ttl: 60_000 } }) on each handler.
+
 @Controller('gating')
 export class GatingController {
   constructor(

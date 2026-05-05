@@ -51,6 +51,11 @@ enum ProvenanceStatus {
   MINT_FAILED
 }
 
+enum GateAssetType {
+  CLASSIC
+  SOROBAN_SAC
+}
+
 enum PhysicalStatus {
   IN_PRODUCTION
   SHIPPED
@@ -348,6 +353,7 @@ model MerchantProduct {
   design          Design          @relation(fields: [designId], references: [id])
   providerProduct ProviderProduct @relation(fields: [providerProductId], references: [id])
   nfts            NftToken[]
+  gating          ProductGating?
 
   @@index([storeId])
   @@index([shopifyProductId])
@@ -706,6 +712,52 @@ model DesignProvenance {
   @@index([fileSha256])
   @@index([status])
   @@map("design_provenance")
+}
+
+// ─── Token-Gated Commerce ───────────────────────────────────────────
+
+model ProductGating {
+  id                 String          @id @default(uuid())
+  merchantProductId  String          @unique
+  merchantProduct    MerchantProduct @relation(fields: [merchantProductId], references: [id], onDelete: Cascade)
+  assetCode          String
+  issuerAddress      String
+  assetType          GateAssetType
+  minBalance         String          @default("1")
+  errorMessage       String?
+  isActive           Boolean         @default(true)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@map("product_gating")
+}
+
+model BuyerWalletSession {
+  id                 String   @id @default(uuid())
+  walletAddress      String
+  sessionToken       String   @unique
+  expiresAt          DateTime
+  lastVerifiedLedger Int?
+  createdAt          DateTime @default(now())
+
+  @@index([walletAddress])
+  @@index([expiresAt])
+  @@map("buyer_wallet_sessions")
+}
+
+model GatingVerification {
+  id                String   @id @default(uuid())
+  walletAddress     String
+  merchantProductId String
+  passed            Boolean
+  observedBalance   String?
+  ledger            Int
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  @@index([walletAddress, merchantProductId])
+  @@index([expiresAt])
+  @@map("gating_verifications")
 }
 
 // ─── Trend Suggestions ──────────────────────────────────────────────

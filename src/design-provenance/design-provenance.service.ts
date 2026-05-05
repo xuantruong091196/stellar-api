@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
@@ -108,7 +108,16 @@ export class DesignProvenanceService {
       throw new ForbiddenException('You do not own this design');
     }
     if (prov.status === ProvenanceStatus.MINTED) return; // idempotent — already done
-
+    if (prov.status === ProvenanceStatus.MINTING) {
+      // A mint is already in flight; jobId-based dedupe means we don't re-enqueue.
+      // Return silently — the inflight job will reach a terminal state on its own.
+      this.logger.log(`Retry skipped for ${designId}: mint already in flight`);
+      return;
+    }
+    if (prov.status === ProvenanceStatus.BURNED) {
+      throw new BadRequestException('This provenance was burned and cannot be re-minted');
+    }
+    // status is MINT_FAILED — reset and re-enqueue
     await this.prisma.designProvenance.update({
       where: { id: prov.id },
       data: {

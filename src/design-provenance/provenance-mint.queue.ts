@@ -54,6 +54,7 @@ export class ProvenanceMintQueue implements OnModuleInit, OnModuleDestroy {
   async enqueue(data: ProvenanceMintJobData): Promise<void> {
     if (!this.queue) throw new Error('Queue not initialized');
     await this.queue.add('mint', data, {
+      jobId: data.provenanceId, // dedupe: while a job with this id is queued/active, duplicate adds are no-ops
       attempts: 5,
       backoff: { type: 'exponential', delay: 30_000 },
       removeOnComplete: 100,

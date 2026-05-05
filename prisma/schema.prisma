@@ -44,6 +44,13 @@ enum NftStatus {
   MINT_FAILED
 }
 
+enum ProvenanceStatus {
+  MINTING
+  MINTED
+  BURNED
+  MINT_FAILED
+}
+
 enum PhysicalStatus {
   IN_PRODUCTION
   SHIPPED
@@ -79,6 +86,7 @@ model Store {
   subscriptionLocks SubscriptionPriceLock[]
   subscription      Subscription?
   trendQuotas       TrendQuota[]
+  provenances       DesignProvenance[]
 }
 
 model Provider {
@@ -159,6 +167,7 @@ model Design {
   merchantProducts MerchantProduct[]
   nfts             NftToken[]
   trendDesigns     TrendDesign[]
+  provenance       DesignProvenance?
 
   @@index([storeId])
   @@index([fileSha256])
@@ -664,6 +673,42 @@ model NftToken {
   @@index([merchantProductId])
   @@index([ownerWalletId])
   @@map("nft_tokens")
+}
+
+// ─── Design Provenance NFT ──────────────────────────────────────────
+
+model DesignProvenance {
+  id                String           @id @default(uuid())
+  designId          String           @unique
+  design            Design           @relation(fields: [designId], references: [id], onDelete: Cascade)
+  storeId           String
+  store             Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  assetCode         String?
+  serialNumber      Int              @unique @default(dbgenerated("nextval('design_provenance_serial_seq')"))
+  issuerPublicKey   String
+  ownerWallet       String
+
+  fileSha256        String
+  metadataUrl       String?
+  metadataHash      String?
+
+  mintTxHash        String?
+  mintLedger        Int?
+  burnTxHash        String?
+  burnedAt          DateTime?
+
+  status            ProvenanceStatus @default(MINTING)
+  errorMessage      String?
+  attempts          Int              @default(0)
+
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([storeId])
+  @@index([fileSha256])
+  @@index([status])
+  @@map("design_provenance")
 }
 
 // ─── Trend Suggestions ──────────────────────────────────────────────

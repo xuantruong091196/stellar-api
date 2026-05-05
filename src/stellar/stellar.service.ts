@@ -1065,6 +1065,41 @@ export class StellarService implements OnModuleInit {
     return { targetWallet: args.issuerPublicKey, needsTransferOnLink: true };
   }
 
+  // ─── SIWS HELPERS ───────────────────────────
+
+  /**
+   * Validate a Stellar G-address (Ed25519 public key).
+   * Returns true when the address is a well-formed Stellar public key.
+   */
+  isValidAddress(address: string): boolean {
+    try {
+      StellarSdk.Keypair.fromPublicKey(address);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Verify a Freighter SIWS signature.
+   *
+   * Freighter signs the raw UTF-8 message bytes with the wallet's Ed25519
+   * key and returns the signature as a hex-encoded 64-byte string.
+   *
+   * NOTE: if Freighter changes its encoding (e.g. base64), adapt the
+   * Buffer.from call below from 'hex' to 'base64'.
+   */
+  verifySignature(walletAddress: string, message: string, signedHex: string): boolean {
+    try {
+      const kp = StellarSdk.Keypair.fromPublicKey(walletAddress);
+      const sigBytes = Buffer.from(signedHex, 'hex');
+      const msgBytes = Buffer.from(message, 'utf8');
+      return kp.verify(msgBytes, sigBytes);
+    } catch {
+      return false;
+    }
+  }
+
   // ─── PRIVATE HELPERS ────────────────────────
 
   private getUsdcAsset(): StellarSdk.Asset {

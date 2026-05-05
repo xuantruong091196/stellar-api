@@ -126,6 +126,7 @@ export default () => ({
 
   features: {
     provenanceMint: process.env.FEATURE_PROVENANCE_MINT === 'true',
+    tokenGating: process.env.FEATURE_TOKEN_GATING === 'true',
   },
 
   subscription: {

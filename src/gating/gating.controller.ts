@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Logger,
+  NotFoundException,
   Param,
   Post,
   Query,
@@ -12,6 +13,7 @@ import {
   UseGuards,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { GatingService } from './gating.service';
 import { BalanceCheckerService } from './balance-checker.service';
@@ -36,15 +38,23 @@ export class GatingController {
   private readonly logger = new Logger(GatingController.name);
 
   constructor(
+    private readonly cfg: ConfigService,
     private readonly svc: GatingService,
     private readonly balance: BalanceCheckerService,
     private readonly siws: BuyerSiwsService,
     private readonly cache: GatingCacheService,
   ) {}
 
+  private requireFeature(): void {
+    if (!this.cfg.get<boolean>('features.tokenGating')) {
+      throw new NotFoundException();
+    }
+  }
+
   // ───── Merchant admin (auto-protected by global ShopifySessionGuard) ─────
   @Post()
   upsert(@Body() dto: UpsertGatingDto, @Req() req: any) {
+    this.requireFeature();
     const storeId = req.store?.id;
     if (!storeId) throw new UnauthorizedException();
     return this.svc.upsert(storeId, dto);
@@ -52,6 +62,7 @@ export class GatingController {
 
   @Get()
   get(@Query('merchantProductId') id: string, @Req() req: any) {
+    this.requireFeature();
     const storeId = req.store?.id;
     if (!storeId) throw new UnauthorizedException();
     return this.svc.get(storeId, id);
@@ -59,6 +70,7 @@ export class GatingController {
 
   @Delete(':merchantProductId')
   remove(@Param('merchantProductId') id: string, @Req() req: any) {
+    this.requireFeature();
     const storeId = req.store?.id;
     if (!storeId) throw new UnauthorizedException();
     return this.svc.remove(storeId, id);

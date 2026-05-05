@@ -3,12 +3,14 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
 import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { S3Service } from '../common/services/s3.service';
+import { DesignProvenanceService } from '../design-provenance/design-provenance.service';
 
 /** Maximum allowed width/height for any dimension of an uploaded image. */
 const MAX_IMAGE_DIMENSION = 20000;
@@ -23,6 +25,7 @@ export class DesignsService {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly s3: S3Service,
+    private readonly provenance: DesignProvenanceService,
   ) {}
 
   /**
@@ -168,6 +171,30 @@ export class DesignsService {
     });
 
     this.logger.log(`Design created: ${design.id}`);
+
+    // 6. Enqueue provenance mint. Placed AFTER prisma.design.create commits so
+    //    the rollback (delete) runs in a separate transaction — this is intentional.
+    //    On ConflictException we roll back the DB row and re-throw so the caller
+    //    gets a 409. On other errors we log a warning and continue; the design is
+    //    usable and the merchant can retry the mint via the provenance API later.
+    // TODO: On ConflictException we only delete the DB row here. The R2 files
+    //    (fileUrl, thumbnailUrl) uploaded in steps 2–3 are NOT cleaned up in this
+    //    pass — a follow-up task should call s3.deleteFile for both keys before
+    //    throwing, to avoid orphaned R2 objects.
+    try {
+      await this.provenance.enqueueMint(design.id);
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        // Roll back the design row so no orphan Design records exist.
+        await this.prisma.design.delete({ where: { id: design.id } });
+        throw err;
+      }
+      // Non-conflict errors: log and continue. Design stays usable.
+      this.logger.warn(
+        `Provenance mint enqueue failed for ${design.id}: ${(err as Error).message}`,
+      );
+    }
+
     return design;
   }
 

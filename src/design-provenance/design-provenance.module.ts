@@ -3,6 +3,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { StellarModule } from '../stellar/stellar.module';
 import { DesignProvenanceService } from './design-provenance.service';
 import { DesignProvenanceController } from './design-provenance.controller';
+import { ProvenanceMintQueue } from './provenance-mint.queue';
 // TODO Task 7: import { ProvenanceMetadataService } from './provenance-metadata.service';
 // TODO Task 8: import { ProvenanceMintProcessor } from './provenance-mint.processor';
 
@@ -10,11 +11,9 @@ import { DesignProvenanceController } from './design-provenance.controller';
   imports: [
     PrismaModule,
     StellarModule,
-    // TODO Task 8: BullModule.registerQueue({ name: 'provenance-mint' }),
-    //   requires @nestjs/bullmq (not yet installed); queue wired via
-    //   ProvenanceMintProcessor using raw bullmq pattern (see trends/trend-design.queue.ts)
   ],
   providers: [
+    ProvenanceMintQueue,
     DesignProvenanceService,
     // TODO Task 7: ProvenanceMetadataService,
     // TODO Task 8: ProvenanceMintProcessor,

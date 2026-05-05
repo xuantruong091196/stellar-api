@@ -12,6 +12,9 @@ import { PackingSlipService } from '../packing-slip/packing-slip.service';
 import { ProviderAdapterFactory } from '../providers/integrations/provider-adapter.factory';
 import { ProvidersService } from '../providers/providers.service';
 import { OrderStatus, EscrowStatus } from '../../generated/prisma';
+import { GatingService } from '../gating/gating.service';
+import { BalanceCheckerService } from '../gating/balance-checker.service';
+import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 
 /** Round a number to 2 decimal places for money math. */
 function round2(n: number): number {
@@ -57,6 +60,9 @@ export class OrdersService {
     private readonly packingSlipService: PackingSlipService,
     private readonly adapterFactory: ProviderAdapterFactory,
     private readonly providers: ProvidersService,
+    private readonly gating: GatingService,
+    private readonly balanceChecker: BalanceCheckerService,
+    private readonly shopifyGraphql: ShopifyGraphqlService,
   ) {}
 
   /**
@@ -102,6 +108,16 @@ export class OrdersService {
         this.logger.error(`NFT minting failed for order ${existing.id}: ${err.message}`);
       });
       return existing;
+    }
+
+    // Server-side gate check before any order is created.
+    // The storefront's client-side gate can be bypassed via direct cart-add;
+    // this is the security backstop. On failure, cancel the Shopify order via
+    // Admin API and return without creating any DB rows.
+    const gateOk = await this.verifyGatingForWebhook(storeId, payload);
+    if (!gateOk) {
+      // Logged + Shopify-cancelled inside verifyGatingForWebhook
+      return null as any;
     }
 
     // Extract customer info
@@ -829,6 +845,111 @@ export class OrdersService {
       data: { physicalStatus },
     });
     this.logger.log(`NFT physicalStatus updated to ${physicalStatus} for order ${orderId}`);
+  }
+
+  /**
+   * Server-side enforcement of token-gating at order time.
+   *
+   * Returns true if all gated line items pass for this buyer wallet (or no
+   * gated items present). On failure, calls Shopify Admin API to cancel +
+   * refund the order, logs the reason, and returns false so the caller skips
+   * order creation entirely.
+   *
+   * Buyer wallet is read from cart `note_attributes.stelo_buyer_wallet`,
+   * which the storefront gate.js writes after SIWS verify.
+   */
+  private async verifyGatingForWebhook(
+    storeId: string,
+    payload: Record<string, unknown>,
+  ): Promise<boolean> {
+    const lineItems =
+      (payload.line_items as Array<Record<string, unknown>>) || [];
+    const shopifyProductIds = lineItems
+      .map((item) => (item.product_id ? String(item.product_id) : null))
+      .filter((id): id is string => id !== null);
+    if (shopifyProductIds.length === 0) return true;
+
+    const merchantProducts = await this.prisma.merchantProduct.findMany({
+      where: { storeId, shopifyProductId: { in: shopifyProductIds } },
+      include: { gating: true, store: true },
+    });
+    const gatedItems = merchantProducts.filter(
+      (mp) => mp.gating && mp.gating.isActive,
+    );
+    if (gatedItems.length === 0) return true;
+
+    const noteAttrs =
+      (payload.note_attributes as Array<{ name: string; value: string }>) || [];
+    const walletAttr = noteAttrs.find((a) => a.name === 'stelo_buyer_wallet');
+    const buyerWallet = walletAttr?.value ?? null;
+    const shopifyOrderId = String(payload.id);
+    const store = gatedItems[0].store;
+
+    if (!buyerWallet) {
+      await this.cancelGatedOrder(
+        store,
+        shopifyOrderId,
+        'gated_product_no_wallet',
+      );
+      return false;
+    }
+
+    for (const mp of gatedItems) {
+      const g = mp.gating!;
+      // Owner-preview bypass: store's own wallet always passes for their products
+      if (store.walletAddress && store.walletAddress === buyerWallet) continue;
+
+      const result =
+        g.assetType === 'CLASSIC'
+          ? await this.balanceChecker.checkClassic(
+              buyerWallet,
+              g.assetCode,
+              g.issuerAddress,
+            )
+          : await this.balanceChecker.checkSorobanSac(
+              buyerWallet,
+              g.issuerAddress,
+            );
+      if (!this.balanceChecker.compare(result.balance, g.minBalance)) {
+        await this.cancelGatedOrder(
+          store,
+          shopifyOrderId,
+          `gated_product_balance_insufficient: ${g.assetCode} (need ${g.minBalance}, has ${result.balance})`,
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Cancel a Shopify order via Admin API and request a full refund.
+   * Logs the reason. Errors here are logged but not re-thrown — webhook should
+   * not retry indefinitely on a broken cancel call (better to leave order in
+   * Shopify uncancelled than spam the cancel endpoint).
+   */
+  private async cancelGatedOrder(
+    store: { shopifyDomain: string; shopifyToken: string },
+    shopifyOrderId: string,
+    reason: string,
+  ): Promise<void> {
+    this.logger.warn(`Order ${shopifyOrderId} cancelled (gated): ${reason}`);
+    try {
+      await this.shopifyGraphql.cancelShopifyOrder(
+        store.shopifyDomain,
+        store.shopifyToken,
+        shopifyOrderId,
+        {
+          reason: 'customer',
+          refund: true,
+          note: `Stelo gating failed: ${reason}`,
+        },
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `Failed to cancel Shopify order ${shopifyOrderId}: ${err.message}`,
+      );
+    }
   }
 
   /**

@@ -561,4 +561,79 @@ export class ShopifyGraphqlService {
 
     return { fulfillmentId: result.fulfillmentCreate.fulfillment!.id };
   }
+
+  // ─── METAFIELDS ──────────────────────────────
+
+  /**
+   * Upsert a single metafield on a Shopify product.
+   * Uses the REST Admin API (2024-10) — simpler than the GraphQL
+   * metafieldsSet mutation for a one-off write.
+   *
+   * Called best-effort from GatingService.upsert; the caller is expected
+   * to catch and warn rather than letting a Shopify transient error
+   * propagate to the merchant request.
+   */
+  async setProductMetafield(
+    shopDomain: string,
+    accessToken: string,
+    shopifyProductId: string,
+    metafield: { namespace: string; key: string; value: string; type: string },
+  ): Promise<void> {
+    const apiVersion = '2024-10';
+    const url = `https://${shopDomain}/admin/api/${apiVersion}/products/${shopifyProductId}/metafields.json`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ metafield }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `setProductMetafield failed for product ${shopifyProductId}: ${response.status} ${body}`,
+      );
+    }
+  }
+
+  // ─── ORDER CANCEL (REST) ──────────────────────
+
+  /**
+   * Cancel a Shopify order and request a full refund via the REST Admin API.
+   * Returns when the cancel request is accepted (2xx). Throws on error so
+   * the caller can decide to retry or fall back to DB-mark-and-defer.
+   */
+  async cancelShopifyOrder(
+    shopDomain: string,
+    accessToken: string,
+    shopifyOrderId: string,
+    opts: { reason?: string; note?: string; refund?: boolean } = {},
+  ): Promise<void> {
+    const apiVersion = '2024-10';
+    const url = `https://${shopDomain}/admin/api/${apiVersion}/orders/${shopifyOrderId}/cancel.json`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({
+        reason: opts.reason ?? 'customer',
+        note: opts.note ?? '',
+        refund: opts.refund ?? true,
+        email: false, // do not send default Shopify cancel email; we handle notifications
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `cancelShopifyOrder failed for order ${shopifyOrderId}: ${response.status} ${body}`,
+      );
+    }
+  }
 }

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StellarModule } from '../stellar/stellar.module';
+import { ShopifyGraphqlModule } from '../shopify-graphql/shopify-graphql.module';
 import { GatingService } from './gating.service';
 import { GatingController } from './gating.controller';
 import { BuyerSiwsService } from './buyer-siws.service';
@@ -9,7 +10,7 @@ import { BalanceCheckerService } from './balance-checker.service';
 import { GatingCacheService } from './gating-cache.service';
 
 @Module({
-  imports: [PrismaModule, StellarModule],
+  imports: [PrismaModule, StellarModule, ShopifyGraphqlModule],
   providers: [
     GatingService,
     BuyerSiwsService,

@@ -8,7 +8,6 @@ import {
 import * as crypto from 'crypto';
 import * as sharp from 'sharp';
 import { PrismaService } from '../prisma/prisma.service';
-import { StellarService } from '../stellar/stellar.service';
 import { S3Service } from '../common/services/s3.service';
 import { DesignProvenanceService } from '../design-provenance/design-provenance.service';
 
@@ -23,7 +22,6 @@ export class DesignsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly stellar: StellarService,
     private readonly s3: S3Service,
     private readonly provenance: DesignProvenanceService,
   ) {}
@@ -124,31 +122,8 @@ export class DesignsService {
       );
     }
 
-    // 4. Register copyright hash on Stellar
-    let copyrightTxHash: string | null = null;
-    let copyrightLedger: number | null = null;
-    let copyrightAt: Date | null = null;
-
-    try {
-      const store = await this.prisma.store.findUnique({
-        where: { id: storeId },
-      });
-
-      if (store?.stellarAddress) {
-        const result = await this.stellar.registerCopyrightHash(
-          fileSha256,
-          store.stellarAddress,
-        );
-        copyrightTxHash = result.txHash;
-        copyrightLedger = result.ledger;
-        copyrightAt = new Date();
-      }
-    } catch (error) {
-      this.logger.warn(
-        `Failed to register copyright on Stellar: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      );
-      // Non-fatal: design is still saved without blockchain registration
-    }
+    // 4. (Legacy copyright registration removed — provenance is now handled
+    //    exclusively by DesignProvenanceService.enqueueMint called below.)
 
     // 5. Save design record. Prefer the server-probed dimensions over the
     // client-supplied ones — the client values can't be trusted (a caller
@@ -164,9 +139,6 @@ export class DesignsService {
         mimeType: file.mimetype,
         width: probedWidth ?? metadata.width,
         height: probedHeight ?? metadata.height,
-        copyrightTxHash,
-        copyrightLedger,
-        copyrightAt,
       },
     });
 
@@ -214,7 +186,15 @@ export class DesignsService {
         where: { storeId },
         include: {
           mockups: true,
-          provenance: { select: { status: true, assetCode: true } },
+          provenance: {
+            select: {
+              status: true,
+              assetCode: true,
+              mintTxHash: true,
+              mintLedger: true,
+              createdAt: true,
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip,

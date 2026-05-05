@@ -155,9 +155,6 @@ model Design {
   mimeType        String
   width           Int?
   height          Int?
-  copyrightTxHash String?
-  copyrightLedger Int?
-  copyrightAt     DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

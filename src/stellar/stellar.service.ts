@@ -27,7 +27,7 @@ export class StellarService implements OnModuleInit {
   private readonly logger = new Logger(StellarService.name);
   private readonly horizonUrl: string;
   private readonly networkPassphrase: string;
-  private readonly server: StellarSdk.Horizon.Server;
+  readonly server: StellarSdk.Horizon.Server;
   private readonly usdcIssuer: string;
 
   private redis: Redis | null = null;
@@ -1098,6 +1098,21 @@ export class StellarService implements OnModuleInit {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Simulate a Soroban contract call (read-only view function).
+   *
+   * STUB: Soroban RPC is not yet wired up project-wide. This method exists
+   * so BalanceCheckerService.checkSorobanSac compiles. Real implementation
+   * lands in Plan C Task 13 when SAC support is enabled end-to-end.
+   */
+  async simulateContractCall(
+    _op: any,
+  ): Promise<{ returnValue: any; latestLedger?: number }> {
+    throw new Error(
+      'simulateContractCall not yet implemented — Soroban RPC config pending (Plan C Task 13)',
+    );
   }
 
   // ─── PRIVATE HELPERS ────────────────────────

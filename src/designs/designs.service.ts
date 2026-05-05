@@ -212,7 +212,10 @@ export class DesignsService {
     const [designs, total] = await Promise.all([
       this.prisma.design.findMany({
         where: { storeId },
-        include: { mockups: true },
+        include: {
+          mockups: true,
+          provenance: { select: { status: true, assetCode: true } },
+        },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,

@@ -33,6 +33,7 @@ import { SystemMonitorModule } from './system-monitor/system-monitor.module';
 import { AiContentModule } from './ai-content/ai-content.module';
 import { TrendsModule } from './trends/trends.module';
 import { SubscriptionModule } from './subscription/subscription.module';
+import { DesignProvenanceModule } from './design-provenance/design-provenance.module';
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { SubscriptionModule } from './subscription/subscription.module';
     AiContentModule,
     SubscriptionModule,
     TrendsModule,
+    DesignProvenanceModule,
   ],
   providers: [
     {

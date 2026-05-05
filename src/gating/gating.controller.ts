@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Logger,
   Param,
   Post,
   Query,
@@ -32,6 +33,8 @@ const BUYER_COOKIE = 'stelo_buyer_session';
 
 @Controller('gating')
 export class GatingController {
+  private readonly logger = new Logger(GatingController.name);
+
   constructor(
     private readonly svc: GatingService,
     private readonly balance: BalanceCheckerService,
@@ -100,21 +103,25 @@ export class GatingController {
 
     const product = await this.svc.getRaw(productId);
     if (!product?.gating || !product.gating.isActive) {
+      this.logger.log(JSON.stringify({ event: 'gate_check', outcome: 'no_gate', productId }));
       return { passed: true, reason: 'no_gate' };
     }
 
     if (!wallet) {
+      this.logger.log(JSON.stringify({ event: 'gate_check', outcome: 'no_wallet', productId }));
       return { passed: false, reason: 'no_wallet' };
     }
 
     // Owner preview — store's own walletAddress always passes for their own products
     if (product.store?.walletAddress === wallet) {
+      this.logger.log(JSON.stringify({ event: 'gate_check', outcome: 'owner_preview', productId, wallet }));
       return { passed: true, reason: 'owner_preview', balance: '∞' };
     }
 
     // Cache check
     const cached = await this.cache.get(wallet, productId);
     if (cached) {
+      this.logger.log(JSON.stringify({ event: 'gate_check', outcome: cached.passed ? 'passed_cached' : 'failed_cached', productId, wallet, assetType: product.gating?.assetType ?? null }));
       return { ...cached, cached: true };
     }
 
@@ -129,6 +136,8 @@ export class GatingController {
     const passed = this.balance.compare(result.balance, g.minBalance);
 
     await this.cache.set(wallet, productId, { passed, balance: result.balance });
+
+    this.logger.log(JSON.stringify({ event: 'gate_check', outcome: passed ? 'passed' : 'failed', productId, wallet, assetType: g.assetType, assetCode: g.assetCode }));
 
     // Default error message uses asset code + min balance when merchant didn't
     // configure a custom one, so storefront always shows something specific.

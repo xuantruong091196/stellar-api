@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StellarModule } from '../stellar/stellar.module';
+import { S3Service } from '../common/services/s3.service';
 import { DesignProvenanceService } from './design-provenance.service';
 import { DesignProvenanceController } from './design-provenance.controller';
 import { ProvenanceMintQueue } from './provenance-mint.queue';
-// TODO Task 7: import { ProvenanceMetadataService } from './provenance-metadata.service';
+import { ProvenanceMetadataService } from './provenance-metadata.service';
 // TODO Task 8: import { ProvenanceMintProcessor } from './provenance-mint.processor';
 
 @Module({
@@ -15,10 +16,11 @@ import { ProvenanceMintQueue } from './provenance-mint.queue';
   providers: [
     ProvenanceMintQueue,
     DesignProvenanceService,
-    // TODO Task 7: ProvenanceMetadataService,
+    ProvenanceMetadataService,
+    S3Service,
     // TODO Task 8: ProvenanceMintProcessor,
   ],
   controllers: [DesignProvenanceController],
-  exports: [DesignProvenanceService],
+  exports: [DesignProvenanceService, ProvenanceMetadataService],
 })
 export class DesignProvenanceModule {}

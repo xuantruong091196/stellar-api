@@ -6,11 +6,24 @@ import { GatingController } from './gating.controller';
 import { BuyerSiwsService } from './buyer-siws.service';
 import { BuyerSessionGuard } from './buyer-session.guard';
 import { BalanceCheckerService } from './balance-checker.service';
+import { GatingCacheService } from './gating-cache.service';
 
 @Module({
   imports: [PrismaModule, StellarModule],
-  providers: [GatingService, BuyerSiwsService, BuyerSessionGuard, BalanceCheckerService],
+  providers: [
+    GatingService,
+    BuyerSiwsService,
+    BuyerSessionGuard,
+    BalanceCheckerService,
+    GatingCacheService,
+  ],
   controllers: [GatingController],
-  exports: [GatingService, BuyerSiwsService, BuyerSessionGuard, BalanceCheckerService],
+  exports: [
+    GatingService,
+    BuyerSiwsService,
+    BuyerSessionGuard,
+    BalanceCheckerService,
+    GatingCacheService,
+  ],
 })
 export class GatingModule {}

@@ -259,6 +259,10 @@ export class DesignsService {
       throw new NotFoundException(`Design ${designId} not found`);
     }
 
+    // Burn provenance NFT on Stellar BEFORE deleting the DB row so the
+    // prov row is still readable when the burn helper runs.
+    await this.provenance.burn(designId);
+
     // Delete files from S3
     try {
       const s3Key = design.fileUrl;

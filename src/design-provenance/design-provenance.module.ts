@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StellarModule } from '../stellar/stellar.module';
 import { S3Service } from '../common/services/s3.service';
@@ -12,6 +13,7 @@ import { ProvenanceMintProcessor } from './provenance-mint.processor';
   imports: [
     PrismaModule,
     StellarModule,
+    ConfigModule,
   ],
   providers: [
     ProvenanceMintQueue,

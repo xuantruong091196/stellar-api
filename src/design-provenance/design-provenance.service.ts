@@ -1,17 +1,25 @@
 import { Injectable, Logger, ConflictException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { StellarService } from '../stellar/stellar.service';
 import { ProvenanceStatus } from '../../generated/prisma';
 import { ProvenanceMintQueue } from './provenance-mint.queue';
 import { ProvenancePublicDto } from './dto/provenance-public.dto';
+import { decrypt } from '../common/crypto.util';
 
 @Injectable()
 export class DesignProvenanceService {
   private readonly logger = new Logger(DesignProvenanceService.name);
+  private readonly encryptionKey: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: ProvenanceMintQueue,
-  ) {}
+    private readonly stellar: StellarService,
+    private readonly config: ConfigService,
+  ) {
+    this.encryptionKey = this.config.get<string>('encryption.key')!;
+  }
 
   async getPublic(designId: string): Promise<ProvenancePublicDto> {
     const prov = await this.prisma.designProvenance.findUniqueOrThrow({
@@ -110,5 +118,49 @@ export class DesignProvenanceService {
     });
     await this.queue.enqueue({ provenanceId: prov.id });
     this.logger.log(`Retry mint queued for design ${designId} (provenance ${prov.id})`);
+  }
+
+  /**
+   * Burn (clawback) the on-chain provenance asset for a design.
+   * No-ops unless status === MINTED.  Must be called BEFORE the design row is
+   * hard-deleted so the prov row is still readable.
+   */
+  async burn(designId: string): Promise<void> {
+    const prov = await this.prisma.designProvenance.findUnique({
+      where: { designId },
+      include: { store: { include: { storeIssuer: true } } },
+    });
+    if (!prov || prov.status !== ProvenanceStatus.MINTED) return;
+
+    if (!prov.store.storeIssuer) {
+      this.logger.warn(
+        `Cannot burn provenance for design ${designId}: store has no issuer`,
+      );
+      return;
+    }
+
+    const issuerSecret = decrypt(
+      prov.store.storeIssuer.encryptedSecretKey,
+      this.encryptionKey,
+    );
+
+    const { txHash } = await this.stellar.burnProvenanceAsset({
+      issuerSecret,
+      assetCode: prov.assetCode!, // non-null: status is MINTED
+      ownerWallet: prov.ownerWallet,
+    });
+
+    await this.prisma.designProvenance.update({
+      where: { id: prov.id },
+      data: {
+        status: ProvenanceStatus.BURNED,
+        burnTxHash: txHash,
+        burnedAt: new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Burned provenance ${prov.assetCode} for design ${designId} (tx ${txHash})`,
+    );
   }
 }

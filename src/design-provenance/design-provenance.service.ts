@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProvenanceStatus } from '../../generated/prisma';
 import { ProvenanceMintQueue } from './provenance-mint.queue';
@@ -90,5 +90,25 @@ export class DesignProvenanceService {
     await this.queue.enqueue({ provenanceId: provenance.id });
 
     this.logger.log(`Enqueued mint for design ${designId} (provenance ${provenance.id})`);
+  }
+
+  async retryMint(designId: string, storeId: string): Promise<void> {
+    const prov = await this.prisma.designProvenance.findUniqueOrThrow({
+      where: { designId },
+    });
+    if (prov.storeId !== storeId) {
+      throw new ForbiddenException('You do not own this design');
+    }
+    if (prov.status === ProvenanceStatus.MINTED) return; // idempotent — already done
+
+    await this.prisma.designProvenance.update({
+      where: { id: prov.id },
+      data: {
+        status: ProvenanceStatus.MINTING,
+        errorMessage: null,
+      },
+    });
+    await this.queue.enqueue({ provenanceId: prov.id });
+    this.logger.log(`Retry mint queued for design ${designId} (provenance ${prov.id})`);
   }
 }

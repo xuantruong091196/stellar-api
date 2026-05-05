@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Req } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Req, UnauthorizedException } from '@nestjs/common';
 import { DesignProvenanceService } from './design-provenance.service';
 import { Public } from '../auth/decorators/public.decorator';
 // NOTE: @nestjs/throttler is not installed. When it is added project-wide,
@@ -41,5 +41,20 @@ export class DesignProvenanceController {
   @Get(':designId')
   async getPublic(@Param('designId') id: string) {
     return this.svc.getPublic(id);
+  }
+
+  /**
+   * Merchant-authenticated retry for a failed mint.
+   * Resets status to MINTING and re-enqueues the job.
+   * No @Public() — global ShopifySessionGuard applies.
+   *
+   * POST /provenance/:designId/retry
+   */
+  @Post(':designId/retry')
+  async retry(@Param('designId') id: string, @Req() req: any) {
+    const storeId = req.store?.id;
+    if (!storeId) throw new UnauthorizedException();
+    await this.svc.retryMint(id, storeId);
+    return { ok: true };
   }
 }

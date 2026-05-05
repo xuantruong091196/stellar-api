@@ -6,7 +6,7 @@ import { DesignProvenanceService } from './design-provenance.service';
 import { DesignProvenanceController } from './design-provenance.controller';
 import { ProvenanceMintQueue } from './provenance-mint.queue';
 import { ProvenanceMetadataService } from './provenance-metadata.service';
-// TODO Task 8: import { ProvenanceMintProcessor } from './provenance-mint.processor';
+import { ProvenanceMintProcessor } from './provenance-mint.processor';
 
 @Module({
   imports: [
@@ -18,7 +18,7 @@ import { ProvenanceMetadataService } from './provenance-metadata.service';
     DesignProvenanceService,
     ProvenanceMetadataService,
     S3Service,
-    // TODO Task 8: ProvenanceMintProcessor,
+    ProvenanceMintProcessor,
   ],
   controllers: [DesignProvenanceController],
   exports: [DesignProvenanceService, ProvenanceMetadataService],

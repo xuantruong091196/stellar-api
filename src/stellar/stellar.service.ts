@@ -914,6 +914,157 @@ export class StellarService implements OnModuleInit {
     });
   }
 
+  // ─── PROVENANCE ASSET OPERATIONS ────────────
+
+  /**
+   * Mint a Design Provenance NFT asset.
+   * Asset code: STELOD{serial}, issued from StoreIssuer.
+   * Sends 1 stroop (0.0000001) to ownerWallet, marking it as the unique authorship token.
+   *
+   * Caller MUST ensure ownerWallet has an open trustline for (assetCode, issuer)
+   * unless ownerWallet === issuer's public key. Use ensureTrustlineOrFallback() if uncertain.
+   */
+  async mintProvenanceAsset(args: {
+    issuerSecret: string;
+    assetCode: string;
+    ownerWallet: string;
+    metadataHash: string;
+  }): Promise<{ txHash: string; ledger: number }> {
+    const { issuerSecret, assetCode, ownerWallet, metadataHash } = args;
+    const issuerKp = StellarSdk.Keypair.fromSecret(issuerSecret);
+    this.logger.log(
+      `Minting provenance asset: asset=${assetCode}, issuer=${issuerKp.publicKey()}, owner=${ownerWallet}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const issuerAccount = await this.server.loadAccount(issuerKp.publicKey());
+      const asset = new StellarSdk.Asset(assetCode, issuerKp.publicKey());
+
+      // Pre-flight: trustline must exist on ownerWallet (or owner == issuer)
+      if (ownerWallet !== issuerKp.publicKey()) {
+        const owner = await this.server.loadAccount(ownerWallet);
+        const hasTrustline = (owner.balances ?? []).some((b: any) =>
+          b.asset_code === assetCode && b.asset_issuer === issuerKp.publicKey(),
+        );
+        if (!hasTrustline) {
+          throw new Error(
+            `Trustline missing on ${ownerWallet} for ${assetCode}. Call ensureTrustlineOrFallback first.`,
+          );
+        }
+      }
+
+      const tx = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: ownerWallet,
+            asset,
+            amount: '0.0000001',
+            source: issuerKp.publicKey(),
+          }),
+        )
+        .addMemo(StellarSdk.Memo.hash(Buffer.from(metadataHash, 'hex')))
+        .setTimeout(180)
+        .build();
+
+      tx.sign(issuerKp);
+      const result = await this.submitWithFeeBump(tx, issuerKp);
+
+      this.logger.log(
+        `Provenance asset minted: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
+   * Burn (clawback) a Design Provenance NFT asset from ownerWallet back to issuer.
+   * Pre-flight: verifies AUTH_CLAWBACK_ENABLED is set on the issuer account.
+   */
+  async burnProvenanceAsset(args: {
+    issuerSecret: string;
+    assetCode: string;
+    ownerWallet: string;
+  }): Promise<{ txHash: string; ledger: number }> {
+    const { issuerSecret, assetCode, ownerWallet } = args;
+    const issuerKp = StellarSdk.Keypair.fromSecret(issuerSecret);
+    this.logger.log(
+      `Burning provenance asset: asset=${assetCode}, issuer=${issuerKp.publicKey()}, from=${ownerWallet}`,
+    );
+
+    return this.withStellarLock(async () => {
+      // Pre-flight: confirm AUTH_CLAWBACK_ENABLED set on issuer (paranoid check —
+      // Digital Twin spec already requires it, but this gives a clearer error if the
+      // store was provisioned before that spec landed)
+      const issuerAccount = await this.server.loadAccount(issuerKp.publicKey());
+      const flags = (issuerAccount as any).flags ?? {};
+      if (!flags.auth_clawback_enabled) {
+        throw new Error(
+          `Issuer ${issuerKp.publicKey()} missing AUTH_CLAWBACK_ENABLED — burn impossible`,
+        );
+      }
+
+      const asset = new StellarSdk.Asset(assetCode, issuerKp.publicKey());
+      const tx = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.clawback({
+            from: ownerWallet,
+            asset,
+            amount: '0.0000001',
+          }),
+        )
+        .setTimeout(180)
+        .build();
+
+      tx.sign(issuerKp);
+      const result = await this.submitWithFeeBump(tx, issuerKp);
+
+      this.logger.log(
+        `Provenance asset burned: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
+   * Returns the wallet address that the next mint should target.
+   * - If ownerWallet === issuerPublicKey → returns issuer (nothing to check)
+   * - If ownerWallet has the trustline → returns ownerWallet
+   * - Otherwise → returns issuerPublicKey as fallback target, with needsTransferOnLink=true
+   *   The caller should later move the asset to ownerWallet once the merchant opens the trustline.
+   */
+  async ensureTrustlineOrFallback(args: {
+    issuerPublicKey: string;
+    assetCode: string;
+    ownerWallet: string;
+  }): Promise<{ targetWallet: string; needsTransferOnLink: boolean }> {
+    if (args.ownerWallet === args.issuerPublicKey) {
+      return { targetWallet: args.issuerPublicKey, needsTransferOnLink: false };
+    }
+    try {
+      const owner = await this.server.loadAccount(args.ownerWallet);
+      const has = (owner.balances ?? []).some(
+        (b: any) =>
+          b.asset_code === args.assetCode &&
+          b.asset_issuer === args.issuerPublicKey,
+      );
+      if (has) return { targetWallet: args.ownerWallet, needsTransferOnLink: false };
+    } catch (err: any) {
+      // 404 = account doesn't exist yet → fallback. Other errors (timeout, 5xx)
+      // surface so we don't silently mint to the wrong wallet on infrastructure issues.
+      const status = err?.response?.status;
+      if (status !== 404) throw err;
+    }
+    return { targetWallet: args.issuerPublicKey, needsTransferOnLink: true };
+  }
+
   // ─── PRIVATE HELPERS ────────────────────────
 
   private getUsdcAsset(): StellarSdk.Asset {

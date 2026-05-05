@@ -34,6 +34,7 @@ import { AiContentModule } from './ai-content/ai-content.module';
 import { TrendsModule } from './trends/trends.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { DesignProvenanceModule } from './design-provenance/design-provenance.module';
+import { GatingModule } from './gating/gating.module';
 
 @Module({
   imports: [
@@ -72,6 +73,7 @@ import { DesignProvenanceModule } from './design-provenance/design-provenance.mo
     SubscriptionModule,
     TrendsModule,
     DesignProvenanceModule,
+    GatingModule,
   ],
   providers: [
     {

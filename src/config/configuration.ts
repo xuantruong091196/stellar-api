@@ -133,6 +133,7 @@ export default () => ({
   features: {
     provenanceMint: process.env.FEATURE_PROVENANCE_MINT === 'true',
     tokenGating: process.env.FEATURE_TOKEN_GATING === 'true',
+    royaltySplitsV2: process.env.FEATURE_ROYALTY_SPLITS_V2 === 'true',
   },
 
   subscription: {

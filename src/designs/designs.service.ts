@@ -152,17 +152,31 @@ export class DesignsService {
     //    On ConflictException we roll back the DB row and re-throw so the caller
     //    gets a 409. On other errors we log a warning and continue; the design is
     //    usable and the merchant can retry the mint via the provenance API later.
-    // TODO: On ConflictException we only delete the DB row here. The R2 files
-    //    (fileUrl, thumbnailUrl) uploaded in steps 2–3 are NOT cleaned up in this
-    //    pass — a follow-up task should call s3.deleteFile for both keys before
-    //    throwing, to avoid orphaned R2 objects.
     if (this.config.get<boolean>('features.provenanceMint')) {
       try {
         await this.provenance.enqueueMint(design.id);
       } catch (err) {
         if (err instanceof ConflictException) {
-          // Roll back the design row so no orphan Design records exist.
+          // Roll back the DB row AND the R2 uploads so no orphan files remain.
+          // Both deletes are best-effort: if R2 transiently fails, the design
+          // row is still the source of truth — orphan files are recoverable
+          // via the deterministic key pattern (`designs/{storeId}/{sha}/...`)
+          // and a future sweep job, but we want the common case clean.
           await this.prisma.design.delete({ where: { id: design.id } });
+          await Promise.allSettled([
+            this.s3.deleteFile(s3Key),
+            thumbnailUrl
+              ? this.s3.deleteFile(`designs/${storeId}/${fileSha256}/thumbnail.png`)
+              : Promise.resolve(),
+          ]).then((results) => {
+            for (const r of results) {
+              if (r.status === 'rejected') {
+                this.logger.warn(
+                  `R2 cleanup on conflict-rollback failed: ${r.reason?.message ?? r.reason}`,
+                );
+              }
+            }
+          });
           throw err;
         }
         // Non-conflict errors: log and continue. Design stays usable.

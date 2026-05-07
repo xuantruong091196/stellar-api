@@ -1,19 +1,28 @@
 import { Test } from '@nestjs/testing';
 import { ConflictException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DesignProvenanceService } from './design-provenance.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ProvenanceMintQueue } from './provenance-mint.queue';
+import { StellarService } from '../stellar/stellar.service';
 
 describe('DesignProvenanceService.checkConflict', () => {
   let svc: DesignProvenanceService;
   const prismaMock = {
     designProvenance: { findFirst: jest.fn() },
   };
+  const queueMock = { enqueue: jest.fn() };
+  const stellarMock = {};
+  const configMock = { get: jest.fn() };
 
   beforeEach(async () => {
     const mod = await Test.createTestingModule({
       providers: [
         DesignProvenanceService,
         { provide: PrismaService, useValue: prismaMock },
+        { provide: ProvenanceMintQueue, useValue: queueMock },
+        { provide: StellarService, useValue: stellarMock },
+        { provide: ConfigService, useValue: configMock },
       ],
     }).compile();
     svc = mod.get(DesignProvenanceService);

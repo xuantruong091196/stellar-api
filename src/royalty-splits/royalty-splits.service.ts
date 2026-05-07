@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { UpsertSplitsDto } from './dto/upsert-splits.dto';
@@ -13,6 +14,7 @@ export class RoyaltySplitsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
+    private readonly cfg: ConfigService,
   ) {}
 
   async upsert(storeId: string, dto: UpsertSplitsDto) {
@@ -40,7 +42,7 @@ export class RoyaltySplitsService {
 
     await this.assertScopeOwnership(storeId, dto.scopeType, dto.scopeId);
 
-    return this.prisma.$transaction(async (tx) => {
+    const persisted = await this.prisma.$transaction(async (tx) => {
       await tx.royaltySplit.deleteMany({
         where: { scopeType: dto.scopeType, scopeId: dto.scopeId },
       });
@@ -59,6 +61,44 @@ export class RoyaltySplitsService {
         orderBy: { percentBps: 'desc' },
       });
     });
+
+    const trustlines = await this.checkTrustlines(persisted);
+    const missingTrustlines = trustlines
+      .filter((t) => !t.hasUsdc)
+      .map((t) => t.wallet);
+    return { splits: persisted, missingTrustlines };
+  }
+
+  /**
+   * Pre-flight check: for each wallet address, verify it has a USDC trustline.
+   * Any wallet without one will cause a Soroban release to revert atomically.
+   *
+   * Returns an array of `{ wallet, hasUsdc }` — one entry per input split.
+   * Failure to reach Horizon is treated as "no trustline" (fail-closed)
+   * so we always fall back to v1 escrow rather than silently promoting to v2.
+   */
+  async checkTrustlines(
+    splits: Array<{ walletAddress: string }>,
+  ): Promise<Array<{ wallet: string; hasUsdc: boolean }>> {
+    const usdcIssuer = this.cfg.getOrThrow<string>('stellar.usdcIssuer');
+    return Promise.all(
+      splits.map(async (s) => {
+        try {
+          const acct: any = await this.stellar.server
+            .accounts()
+            .accountId(s.walletAddress)
+            .call();
+          const has = (acct.balances ?? []).some(
+            (b: any) =>
+              b.asset_code === 'USDC' && b.asset_issuer === usdcIssuer,
+          );
+          return { wallet: s.walletAddress, hasUsdc: has };
+        } catch {
+          // Account doesn't exist or transient Horizon error — treat as no trustline
+          return { wallet: s.walletAddress, hasUsdc: false };
+        }
+      }),
+    );
   }
 
   async list(

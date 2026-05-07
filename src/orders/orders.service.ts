@@ -16,6 +16,7 @@ import { GatingService } from '../gating/gating.service';
 import { BalanceCheckerService } from '../gating/balance-checker.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
 import { SplitResolverService } from '../royalty-splits/split-resolver.service';
+import { RoyaltySplitsService } from '../royalty-splits/royalty-splits.service';
 
 /** Round a number to 2 decimal places for money math. */
 function round2(n: number): number {
@@ -65,6 +66,7 @@ export class OrdersService {
     private readonly balanceChecker: BalanceCheckerService,
     private readonly shopifyGraphql: ShopifyGraphqlService,
     private readonly splitResolver: SplitResolverService,
+    private readonly royaltySplitsService: RoyaltySplitsService,
   ) {}
 
   /**
@@ -150,13 +152,18 @@ export class OrdersService {
     const platformFee = round2(totalPrice * platformFeeRate);
     const providerPay = round2(totalPrice - platformFee);
 
-    // ── Task 16: Snapshot royalty splits at order creation (Plan B) ──────────
+    // ── Task 16 + Task 19/20: Snapshot royalty splits at order creation ───────
     // Resolve splits for the first matched MerchantProduct and snapshot them
-    // onto the order row. If any splits are found, escrowVersion is set to 2
-    // so the escrow router (Task 15) can direct this order to escrow_v2 once
-    // Soroban submission is wired (Plan C). Until then, EscrowV2Service
-    // returns isAvailable()=false and the router falls back to v1 transparently
-    // — no existing order flow is broken.
+    // onto the order row.
+    //
+    // Task 20 (feature flag): the entire v2 path is gated behind
+    // FEATURE_ROYALTY_SPLITS_V2=true. When false (default), all orders use
+    // v1 escrow unconditionally — no split resolution is attempted.
+    //
+    // Task 19 (trustline pre-flight): before promoting to escrowVersion=2,
+    // verify that EVERY beneficiary has a USDC trustline. If any are missing,
+    // downgrade to v1 escrow to avoid Soroban `release` reverting atomically.
+    // A downgrade is always non-fatal — ops can see why via the warn log line.
     const lineItemsForSnapshot =
       (payload.line_items as Array<Record<string, unknown>>) || [];
     const firstShopifyProductId = lineItemsForSnapshot
@@ -166,7 +173,8 @@ export class OrdersService {
     let royaltySnapshot: object | null = null;
     let escrowVersion = 1;
 
-    if (firstShopifyProductId) {
+    const splitsV2Enabled = this.config.get<boolean>('features.royaltySplitsV2');
+    if (firstShopifyProductId && splitsV2Enabled) {
       const mp = await this.prisma.merchantProduct.findFirst({
         where: { storeId, shopifyProductId: firstShopifyProductId },
       });
@@ -174,17 +182,29 @@ export class OrdersService {
         try {
           const splits = await this.splitResolver.resolve(mp.id);
           if (splits.length > 0) {
-            escrowVersion = 2;
-            royaltySnapshot = splits;
-            this.logger.log(
-              `Order snapshot: ${splits.length} royalty split(s) found for product ${mp.id} — escrowVersion=2`,
-            );
+            // Pre-flight: every beneficiary must have a USDC trustline.
+            // If any are missing, downgrade to v1 escrow to avoid Soroban release
+            // reverting atomically; log a ChangeLog-style warning so ops can see why.
+            const trustlines = await this.royaltySplitsService.checkTrustlines(splits);
+            const missing = trustlines.filter((t) => !t.hasUsdc).map((t) => t.wallet);
+            if (missing.length > 0) {
+              this.logger.warn(
+                `Order from store ${storeId} downgraded to v1 escrow — beneficiaries missing USDC trustline: ${missing.join(', ')}`,
+              );
+              // Stay on v1 (escrowVersion=1, no snapshot)
+            } else {
+              escrowVersion = 2;
+              royaltySnapshot = splits as unknown as object;
+              this.logger.log(
+                `Order snapshot: ${splits.length} royalty split(s) found for product ${mp.id} — escrowVersion=2`,
+              );
+            }
           }
         } catch (err: any) {
-          // Non-fatal: split resolution failure must not block order creation.
+          // Non-fatal: split resolution or trustline check failure must not block order creation.
           // Log and fall back to v1 escrow.
           this.logger.warn(
-            `Split resolution failed for product ${mp.id}: ${err.message}. Falling back to escrowVersion=1.`,
+            `Royalty snapshot failed for order from store ${storeId}: ${err.message}. Falling back to v1 escrow.`,
           );
         }
       }

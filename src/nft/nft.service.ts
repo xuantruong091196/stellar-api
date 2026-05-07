@@ -7,6 +7,8 @@ import { EmailService } from '../notifications/email.service';
 import { ConfigService } from '@nestjs/config';
 import { encrypt, decrypt } from '../common/crypto.util';
 import { NftStatus } from '../../generated/prisma';
+import { SteloNftService } from '../secondary-market/stelo-nft.service';
+import { RoyaltyPoliciesService } from '../secondary-market/royalty-policies.service';
 
 @Injectable()
 export class NftService {
@@ -19,6 +21,8 @@ export class NftService {
     private readonly metadata: NftMetadataService,
     private readonly emailService: EmailService,
     private readonly config: ConfigService,
+    private readonly steloNft: SteloNftService,
+    private readonly policies: RoyaltyPoliciesService,
   ) {
     this.encryptionKey = this.config.get<string>('encryption.key')!;
   }
@@ -72,6 +76,28 @@ export class NftService {
       };
     }>;
   }) {
+    // ── Soroban NFT mint path (Plan D Task 16) ──────────────────────────────
+    // Guard: flag must be on AND SteloNftService must be wired (isAvailable()).
+    // Both conditions are false by default, so this branch never triggers today.
+    // When Soroban helpers + audit are complete, flip features.sorobanNft=true
+    // AND implement the early-return body below.
+    const useSoroban =
+      this.config.get<boolean>('features.sorobanNft') === true &&
+      this.steloNft.isAvailable();
+    if (useSoroban) {
+      // TODO Plan D follow-up: Soroban mint path
+      // - resolve royalty policy via this.policies for each item's
+      //   merchantProduct (designId / merchantProductId)
+      // - call this.steloNft.mint({ storeId, ownerWallet, metadataHash, royaltyPolicy })
+      // - persist NftToken with contractAddress + contractTokenId, isClassicLegacy=false
+      // - return early without running the classic asset mint below
+      this.logger.log(
+        'Soroban NFT mint path enabled but not implemented; falling back to classic',
+      );
+      // Fall through to classic until SteloNftService.mint is real.
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     const issuer = await this.findOrCreateStoreIssuer(order.storeId);
     const wallet = await this.findOrCreateBuyerWallet(order.customerEmail);
 

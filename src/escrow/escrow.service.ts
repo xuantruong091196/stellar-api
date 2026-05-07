@@ -122,15 +122,25 @@ export class EscrowService {
     });
 
     // v1/v2 router: check escrowVersion on the parent order.
-    // If v2 is available (Soroban wired + contract configured), route to it.
-    // Otherwise fall through to v1 path (no change to existing behaviour).
-    if (existing?.order && existing.order.escrowVersion === 2 && this.escrowV2.isAvailable()) {
-      this.logger.log(
-        `lockEscrow: routing order ${existing.orderId} to escrow_v2 (Soroban)`,
+    // If v2 is available (Soroban wired + contract configured), route to it
+    // and HARD-STOP — don't fall through to the v1 XDR build below. When
+    // isSorobanReady() flips to true, this guard prevents silent double-routing
+    // (the v2 branch logging then v1 still building an XDR).
+    if (
+      existing?.order &&
+      existing.order.escrowVersion === 2 &&
+      this.escrowV2.isAvailable()
+    ) {
+      // FIXME Plan B follow-up: load royaltySnapshot from existing.order, build
+      // LockArgs (amountStroops, platformFeeStroops, beneficiaries, expiresAt),
+      // call this.escrowV2.lock(args), persist tx hash, return XDR-equivalent.
+      // Until Soroban submission helpers ship, this throws — orders that flagged
+      // themselves as v2 at create-time but reach lock with v2 unavailable are a
+      // misconfiguration that should surface loudly, not silently degrade.
+      throw new BadRequestException(
+        `Order ${existing.orderId} is escrowVersion=2 but escrow_v2 lock path is not yet implemented. ` +
+          `This indicates a configuration mismatch — flip FEATURE_ROYALTY_SPLITS_V2=false until Soroban submission lands.`,
       );
-      // TODO Plan C follow-up: pass royaltySnapshot from order, build LockArgs,
-      // call this.escrowV2.lock(args) and return { escrowId: existing.id, txHash }.
-      // For now this branch is unreachable because isAvailable() returns false.
     }
 
     if (existing) {

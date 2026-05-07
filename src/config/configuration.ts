@@ -19,12 +19,18 @@ export default () => ({
     horizonUrl:
       process.env.STELLAR_HORIZON_URL ||
       'https://horizon-testnet.stellar.org',
+    sorobanRpcUrl:
+      process.env.STELLAR_SOROBAN_RPC_URL ||
+      'https://soroban-testnet.stellar.org',
     systemSecretKey: readSecret('SYSTEM_STELLAR_SECRET_KEY'),
     escrowSecretKey: readSecret('ESCROW_STELLAR_SECRET_KEY'),
     treasurySecretKey: readSecret('TREASURY_STELLAR_SECRET_KEY'),
+    arbiterSecretKey: readSecret('ARBITER_STELLAR_SECRET_KEY'),
     usdcIssuer:
       process.env.USDC_ISSUER ||
       'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+    // Soroban contract IDs (set after running deploy scripts in stellarpod-contracts/)
+    escrowV2ContractId: process.env.STELLAR_ESCROW_V2_CONTRACT_ID,
   },
 
   shopify: {

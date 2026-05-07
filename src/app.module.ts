@@ -36,6 +36,7 @@ import { TrendsModule } from './trends/trends.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { DesignProvenanceModule } from './design-provenance/design-provenance.module';
 import { GatingModule } from './gating/gating.module';
+import { RoyaltySplitsModule } from './royalty-splits/royalty-splits.module';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { GatingModule } from './gating/gating.module';
     TrendsModule,
     DesignProvenanceModule,
     GatingModule,
+    RoyaltySplitsModule,
   ],
   providers: [
     {

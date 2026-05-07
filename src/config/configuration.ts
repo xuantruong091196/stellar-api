@@ -31,6 +31,9 @@ export default () => ({
       'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
     // Soroban contract IDs (set after running deploy scripts in stellarpod-contracts/)
     escrowV2ContractId: process.env.STELLAR_ESCROW_V2_CONTRACT_ID,
+    // Plan D: secondary marketplace
+    marketplaceContractId: process.env.STELLAR_MARKETPLACE_CONTRACT_ID,
+    steloNftWasmHash: process.env.STELO_NFT_WASM_HASH,
   },
 
   shopify: {
@@ -134,6 +137,8 @@ export default () => ({
     provenanceMint: process.env.FEATURE_PROVENANCE_MINT === 'true',
     tokenGating: process.env.FEATURE_TOKEN_GATING === 'true',
     royaltySplitsV2: process.env.FEATURE_ROYALTY_SPLITS_V2 === 'true',
+    sorobanNft: process.env.FEATURE_SOROBAN_NFT === 'true',
+    marketplace: process.env.FEATURE_MARKETPLACE === 'true',
   },
 
   subscription: {

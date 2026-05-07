@@ -61,6 +61,18 @@ enum RoyaltyScope {
   MERCHANT_PRODUCT
 }
 
+enum PolicyScope {
+  DESIGN
+  MERCHANT_PRODUCT
+  NFT_TOKEN
+}
+
+enum PolicyStatus {
+  PENDING_SYNC
+  SYNCED
+  OUTDATED
+}
+
 enum PhysicalStatus {
   IN_PRODUCTION
   SHIPPED
@@ -626,6 +638,7 @@ model StoreIssuer {
   encryptedSecretKey String
   fundedAt           DateTime?
   createdAt          DateTime  @default(now())
+  nftContractAddress String?   // Soroban stelo_nft contract deployed for this store
 
   @@map("store_issuers")
 }
@@ -669,6 +682,10 @@ model NftToken {
   mintLedger     Int?
   burnTxHash     String?
   deliveryTxHash String?
+
+  contractAddress String?
+  contractTokenId String?
+  isClassicLegacy Boolean @default(true)
 
   status         NftStatus       @default(MINTING)
   physicalStatus PhysicalStatus?
@@ -934,4 +951,61 @@ model TrendQuota {
 
   @@unique([storeId, date])
   @@map("trend_quotas")
+}
+
+// ─── Secondary Marketplace ──────────────────────────────────────────
+
+model NftRoyaltyPolicy {
+  id              String       @id @default(uuid())
+  scopeType       PolicyScope
+  scopeId         String
+  contractAddress String
+  splits          Json
+  totalRoyaltyBps Int
+  effectiveFrom   DateTime
+  effectiveUntil  DateTime?
+  onChainTxHash   String?
+  status          PolicyStatus
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([scopeType, scopeId])
+  @@map("nft_royalty_policies")
+}
+
+model NftListing {
+  id            String    @id @default(uuid())
+  nftTokenId    String    @unique
+  sellerAddress String
+  priceUsdc     Float
+  status        String
+  listedAt      DateTime  @default(now())
+  expiresAt     DateTime?
+  soldAt        DateTime?
+  cancelledAt   DateTime?
+  listingTxHash String?
+  saleTxHash    String?
+  buyerAddress  String?
+
+  @@index([status])
+  @@map("nft_listings")
+}
+
+model SecondaryRoyaltyPayment {
+  id             String   @id @default(uuid())
+  nftTokenId     String
+  saleTxHash     String   @unique
+  saleAmountUsdc Float
+  totalRoyalty   Float
+  splits         Json
+  ledger         Int
+  createdAt      DateTime @default(now())
+
+  @@index([nftTokenId])
+  @@map("secondary_royalty_payments")
+}
+
+model Cursor {
+  name  String @id
+  value String
 }

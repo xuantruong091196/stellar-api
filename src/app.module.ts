@@ -37,6 +37,7 @@ import { SubscriptionModule } from './subscription/subscription.module';
 import { DesignProvenanceModule } from './design-provenance/design-provenance.module';
 import { GatingModule } from './gating/gating.module';
 import { RoyaltySplitsModule } from './royalty-splits/royalty-splits.module';
+import { SecondaryMarketModule } from './secondary-market/secondary-market.module';
 
 @Module({
   imports: [
@@ -82,6 +83,7 @@ import { RoyaltySplitsModule } from './royalty-splits/royalty-splits.module';
     DesignProvenanceModule,
     GatingModule,
     RoyaltySplitsModule,
+    SecondaryMarketModule,
   ],
   providers: [
     {

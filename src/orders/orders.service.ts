@@ -945,7 +945,7 @@ export class OrdersService {
    * Shopify uncancelled than spam the cancel endpoint).
    */
   private async cancelGatedOrder(
-    store: { shopifyDomain: string; shopifyToken: string },
+    store: { id: string; shopifyDomain: string; shopifyToken: string },
     shopifyOrderId: string,
     reason: string,
   ): Promise<void> {
@@ -962,9 +962,35 @@ export class OrdersService {
         },
       );
     } catch (err: any) {
+      // Cancel failed — Shopify order is still live with payment captured.
+      // Emit an outbox event so ops can see this in a SQL query (in addition
+      // to the log line). The event is `failed` immediately so the outbox
+      // processor doesn't retry the cancel automatically — manual review is
+      // safer than blind retries on Shopify Admin API.
       this.logger.error(
         `Failed to cancel Shopify order ${shopifyOrderId}: ${err.message}`,
       );
+      try {
+        await this.prisma.eventOutbox.create({
+          data: {
+            eventType: 'gating.cancel_failed',
+            storeId: store.id,
+            status: 'failed',
+            attempts: 1,
+            lastError: err.message?.slice(0, 1000) ?? 'unknown',
+            payload: {
+              shopifyOrderId,
+              shopifyDomain: store.shopifyDomain,
+              gatingFailureReason: reason,
+            } as never,
+          },
+        });
+      } catch (auditErr: any) {
+        // Best-effort audit — don't crash the webhook if Prisma is also down
+        this.logger.error(
+          `Failed to write gating cancel audit row: ${auditErr.message}`,
+        );
+      }
     }
   }
 

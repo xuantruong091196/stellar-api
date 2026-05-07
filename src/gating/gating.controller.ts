@@ -13,6 +13,7 @@ import {
   UseGuards,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { GatingService } from './gating.service';
@@ -25,13 +26,6 @@ import { UpsertGatingDto } from './dto/upsert-gating.dto';
 import { ChallengeDto, VerifyDto } from './dto/buyer-challenge.dto';
 
 const BUYER_COOKIE = 'stelo_buyer_session';
-
-// TODO: rate-limit storefront-facing routes once @nestjs/throttler is wired
-// project-wide (tracked alongside the same dependency for /provenance:designId).
-// Required limits (Plan C Task 8):
-//   - GET  /gating/check                       → 10 req/min/IP
-//   - POST /gating/buyer-siws/challenge        →  5 req/min/IP
-// Apply via @Throttle({ default: { limit: N, ttl: 60_000 } }) on each handler.
 
 @Controller('gating')
 export class GatingController {
@@ -77,8 +71,11 @@ export class GatingController {
   }
 
   // ───── Buyer SIWS (public) ─────
+  // Tightest limit — nonce-issuance shouldn't be needed often; 5/min/IP prevents
+  // nonce-farming that could be used to pre-compute challenges.
   @Public()
   @Post('buyer-siws/challenge')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   challenge(@Body() dto: ChallengeDto) {
     return this.siws.challenge(dto.walletAddress);
   }
@@ -107,8 +104,10 @@ export class GatingController {
   }
 
   // ───── Gate check (public, optional buyer cookie) ─────
+  // Tight limit — prevents scraping product gating config across all products.
   @Public()
   @Get('check')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async check(@Query('merchantProductId') productId: string, @Req() req: Request) {
     const token = (req as any).cookies?.[BUYER_COOKIE];
     const wallet = token ? (await this.siws.loadSession(token))?.walletAddress : null;

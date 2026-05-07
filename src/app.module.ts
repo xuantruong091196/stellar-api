@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import configuration from './config/configuration';
 import { PrismaModule } from './prisma/prisma.module';
 import { ShopifyModule } from './shopify/shopify.module';
@@ -44,6 +45,11 @@ import { GatingModule } from './gating/gating.module';
     }),
     ScheduleModule.forRoot(),
     EventEmitterModule.forRoot({ wildcard: false, maxListeners: 50, verboseMemoryLeak: false }),
+    ThrottlerModule.forRoot([
+      // Default: 60 req/min/IP for any unannotated route.
+      // Per-route @Throttle decorators override this for sensitive endpoints.
+      { ttl: 60_000, limit: 60 },
+    ]),
     PrismaModule,
     StellarModule,
     ShopifyModule,
@@ -76,6 +82,10 @@ import { GatingModule } from './gating/gating.module';
     GatingModule,
   ],
   providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
     {
       provide: APP_GUARD,
       useClass: ShopifySessionGuard,

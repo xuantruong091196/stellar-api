@@ -89,6 +89,12 @@ export class CreateProductDto {
   @MaxLength(10_000_000)
   mockupDataUrl?: string;
 
+  @ApiPropertyOptional({ description: 'Design-only PNG (transparent background) data URL — used for color-variant compositing' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10_000_000)
+  overlayDataUrl?: string;
+
   @IsOptional()
   @IsBoolean()
   isBurnToClaim?: boolean;

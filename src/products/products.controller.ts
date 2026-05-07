@@ -95,6 +95,14 @@ export class ProductsController {
     return this.productsService.regenerateSeo(productId, callerStoreId);
   }
 
+  @Post(':productId/regenerate-mockups')
+  @ApiOperation({ summary: 'Re-enqueue color-variant mockup generation for a product' })
+  @ApiResponse({ status: 200, description: 'Job enqueued — poll the product for new mockups' })
+  async regenerateMockups(@Param('productId') productId: string, @Req() req: any) {
+    const callerStoreId = this.requireStoreId(req);
+    return this.productsService.regenerateMockups(productId, callerStoreId);
+  }
+
   @Patch(':productId/seo')
   @ApiOperation({ summary: 'Manually update SEO fields for a product' })
   async updateSeo(

@@ -20,6 +20,7 @@ import {
 import { DesignsService } from './designs.service';
 import { UploadDesignDto } from './dto/upload-design.dto';
 import { QueryDesignsDto } from './dto/query-designs.dto';
+import { ExtractLayerDto } from './dto/extract-layer.dto';
 
 @ApiTags('designs')
 @Controller('designs')
@@ -82,6 +83,19 @@ export class DesignsController {
     const design = await this.designsService.getDesign(designId);
     if (design.storeId !== callerStoreId) throw new ForbiddenException();
     return design;
+  }
+
+  @Post('detail/:designId/extract-layer')
+  @ApiOperation({ summary: 'Extract one Photoshop-style layer from a design at the click point' })
+  @ApiParam({ name: 'designId', description: 'Design ID' })
+  @ApiResponse({ status: 200, description: 'Layer + punched-source URLs and bbox' })
+  @ApiResponse({ status: 400, description: 'No object detected at this point' })
+  async extractLayer(
+    @Param('designId') designId: string,
+    @Body() dto: ExtractLayerDto,
+    @Req() req: any,
+  ) {
+    return this.designsService.extractLayer(designId, this.requireStoreId(req), dto);
   }
 
   @Delete(':designId')

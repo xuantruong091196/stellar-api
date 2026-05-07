@@ -4,6 +4,8 @@ import * as sharp from 'sharp';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../prisma/prisma.service';
 import { safeImageFetch } from '../common/safe-fetch';
+import { SamService } from './sam.service';
+import type { ProviderProduct, ProviderProductVariant } from '../../generated/prisma';
 
 /**
  * Product template definitions — where to place the design on the product image.
@@ -45,6 +47,7 @@ export class MockupService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly sam: SamService,
   ) {
     const r2AccountId = this.config.get<string>('aws.r2AccountId');
     const accessKeyId = this.config.get<string>('aws.accessKeyId');
@@ -244,84 +247,220 @@ export class MockupService {
     return colorNames[productType] || 'white';
   }
 
-  /**
-   * Generate composite mockups for a MerchantProduct:
-   * - Fetches design image from URL
-   * - For each color in providerProduct.blankImages, fetches blank product photo
-   * - Composites design onto the blank at the correct print area coordinates
-   * - Uploads result to R2, saves Mockup record linked to design
-   *
-   * Idempotent — skips colors that already have a mockup.
-   * Returns the list of mockups (existing + newly generated).
-   */
-  async generateProductMockups(input: {
-    designId: string;
-    designUrl: string;
-    blankImages: Record<string, string>;
-    printConfig: { printArea: string; x: number; y: number; scale: number; rotation: number };
-    productType: string;
-    printAreaPx?: { widthPx: number; heightPx: number };
-  }): Promise<Array<{ color: string; imageUrl: string }>> {
-    const results: Array<{ color: string; imageUrl: string }> = [];
+  private targetLuminance(hex: string): number {
+    const n = parseInt(hex.replace('#', ''), 16);
+    const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  }
 
-    // Load existing mockups for this design
-    const existing = await this.prisma.mockup.findMany({
-      where: { designId: input.designId, productType: input.productType },
-    });
-    const existingByVariant = new Map(existing.map((m) => [m.variant, m]));
+  private async fetchAsBuffer(url: string): Promise<Buffer> {
+    return safeImageFetch(url);
+  }
 
-    // Fetch the design once
-    let designBuffer: Buffer;
-    try {
-      designBuffer = await safeImageFetch(input.designUrl);
-    } catch (err) {
-      this.logger.error(`Failed to load design ${input.designId}: ${(err as Error).message}`);
-      return [];
+  async composeColorVariant(input: {
+    canonicalBlankUrl: string;
+    shirtMaskUrl: string | null;
+    designOverlayUrl: string;
+    colorHex: string;
+  }): Promise<Buffer> {
+    const blank = await this.fetchAsBuffer(input.canonicalBlankUrl);
+    const mask = input.shirtMaskUrl ? await this.fetchAsBuffer(input.shirtMaskUrl) : null;
+    const overlay = await this.fetchAsBuffer(input.designOverlayUrl);
+
+    const blankMeta = await sharp(blank).metadata();
+    const w = blankMeta.width || 1200;
+    const h = blankMeta.height || 1200;
+    const isDarkTarget = this.targetLuminance(input.colorHex) < 96;
+
+    const tintLayer = await sharp({
+      create: { width: w, height: h, channels: 4, background: input.colorHex },
+    }).png().toBuffer();
+
+    let recolored = await sharp(blank)
+      .composite([{ input: tintLayer, blend: 'multiply' }])
+      .png()
+      .toBuffer();
+
+    if (isDarkTarget) {
+      const highlightLayer = await sharp(blank)
+        .greyscale()
+        .linear(0.55, 0)
+        .png()
+        .toBuffer();
+      recolored = await sharp(recolored)
+        .composite([{ input: highlightLayer, blend: 'screen' }])
+        .png()
+        .toBuffer();
     }
 
-    // Get design metadata for smart placement
-    const designMeta = await sharp(designBuffer).metadata();
+    if (mask) {
+      // Resize mask to blank dims if shape differs.
+      const resizedMask = await sharp(mask).resize(w, h, { fit: 'fill' }).png().toBuffer();
+      const maskApplied = await sharp(recolored)
+        .composite([{ input: resizedMask, blend: 'dest-in' }])
+        .png()
+        .toBuffer();
+      recolored = await sharp(blank)
+        .composite([{ input: maskApplied, blend: 'over' }])
+        .png()
+        .toBuffer();
+    }
 
-    // Process each color
-    for (const [color, blankUrl] of Object.entries(input.blankImages)) {
-      // Skip if already generated
-      if (existingByVariant.has(color)) {
-        const mockup = existingByVariant.get(color)!;
-        results.push({ color, imageUrl: mockup.imageUrl });
+    const overlayResized = await sharp(overlay).resize(w, h, { fit: 'fill' }).toBuffer();
+    return sharp(recolored)
+      .composite([{ input: overlayResized, blend: 'over' }])
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  }
+
+  /**
+   * Generate per-color recolored mockups for one (designId, productType).
+   * Looks up SAM mask via SamService (lazy-populated). On SAM-failed
+   * provider products this returns immediately with no Mockup rows
+   * created — UI falls back to editor-export only.
+   */
+  async generateColorVariants(input: {
+    designId: string;
+    productType: string;
+    providerProduct: ProviderProduct & { variants: ProviderProductVariant[] };
+    designOverlayUrl: string;
+  }): Promise<{ generated: number; skipped: number }> {
+    const blanks = input.providerProduct.blankImages as Record<string, string>;
+    const colors = Object.entries(blanks);
+    if (colors.length === 0) return { generated: 0, skipped: 0 };
+
+    const canonicalBlankUrl = colors[0][1];
+    const mask = await this.sam.getOrCreateMask(input.providerProduct);
+    if (!mask) {
+      this.logger.warn(`SAM mask unavailable for ${input.providerProduct.id}; skipping color variants`);
+      return { generated: 0, skipped: colors.length };
+    }
+    // Re-derive the mask's R2 URL by re-reading the row (sam.service set it).
+    const refreshed = await this.prisma.providerProduct.findUnique({
+      where: { id: input.providerProduct.id },
+      select: { shirtMaskUrl: true },
+    });
+    const shirtMaskUrl = refreshed?.shirtMaskUrl && refreshed.shirtMaskUrl !== 'FAILED'
+      ? refreshed.shirtMaskUrl
+      : null;
+    if (!shirtMaskUrl) return { generated: 0, skipped: colors.length };
+
+    const colorHexByName = new Map<string, string>();
+    for (const v of input.providerProduct.variants) {
+      if (v.color && v.colorHex) colorHexByName.set(v.color, v.colorHex);
+    }
+
+    let generated = 0;
+    let skipped = 0;
+    for (const [colorName] of colors) {
+      const colorHex = colorHexByName.get(colorName);
+      if (!colorHex) {
+        this.logger.warn(`No colorHex for ${colorName} on ${input.providerProduct.id}; skipping`);
+        skipped++;
         continue;
       }
-
       try {
-        const mockupBuffer = await this.compositeDesignOnBlank(
-          designBuffer,
-          blankUrl,
-          input.printConfig,
-          designMeta,
-          input.printAreaPx,
-        );
-
-        const key = `mockups/${input.designId}/${input.productType}-${sanitizeColor(color)}.jpg`;
-        const imageUrl = await this.uploadToR2(key, mockupBuffer);
-
-        await this.prisma.mockup.create({
-          data: {
+        const buffer = await this.composeColorVariant({
+          canonicalBlankUrl,
+          shirtMaskUrl,
+          designOverlayUrl: input.designOverlayUrl,
+          colorHex,
+        });
+        const safeColor = colorName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        const key = `mockups/${input.designId}/${input.productType}-${safeColor}.jpg`;
+        const imageUrl = await this.uploadToR2(key, buffer);
+        await this.prisma.mockup.upsert({
+          where: {
+            designId_productType_variant: {
+              designId: input.designId,
+              productType: input.productType,
+              variant: colorName,
+            },
+          },
+          update: { imageUrl },
+          create: {
             designId: input.designId,
             productType: input.productType,
-            variant: color,
+            variant: colorName,
             imageUrl,
           },
         });
-
-        results.push({ color, imageUrl });
-        this.logger.log(`Mockup generated for design ${input.designId}, color ${color}`);
-      } catch (err) {
-        this.logger.error(
-          `Failed to generate mockup for ${input.designId}/${color}: ${(err as Error).message}`,
-        );
+        generated++;
+      } catch (e) {
+        this.logger.error(`Color variant ${colorName} failed for ${input.designId}: ${(e as Error).message}`);
+        skipped++;
       }
     }
 
-    return results;
+    this.logger.log(`generateColorVariants ${input.designId}: ${generated} done, ${skipped} skipped`);
+    return { generated, skipped };
+  }
+
+  /**
+   * Worker entry point — fetches providerProduct and delegates to
+   * generateColorVariants. Kept as a thin shim so MockupModule can wire
+   * the BullMQ processor without circular DI.
+   */
+  async runColorVariantsJob(data: {
+    designId: string;
+    productType: string;
+    providerProductId: string;
+    designOverlayUrl: string;
+  }): Promise<void> {
+    const providerProduct = await this.prisma.providerProduct.findUnique({
+      where: { id: data.providerProductId },
+      include: { variants: true },
+    });
+    if (!providerProduct) {
+      this.logger.warn(`runColorVariantsJob: providerProduct ${data.providerProductId} missing`);
+      return;
+    }
+    await this.generateColorVariants({
+      designId: data.designId,
+      productType: data.productType,
+      providerProduct,
+      designOverlayUrl: data.designOverlayUrl,
+    });
+  }
+
+  /**
+   * Upload the design-only PNG produced by the editor (with __blank and
+   * __printArea hidden). Stored as Mockup variant='design-overlay' so
+   * `composeColorVariant` can fetch it later by designId.
+   */
+  async uploadDesignOverlay(
+    designId: string,
+    productType: string,
+    dataUrl: string,
+  ): Promise<string> {
+    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
+    if (!match) throw new Error('Invalid data URL format');
+    const buffer = Buffer.from(match[2], 'base64');
+    // Keep PNG — we need the alpha channel for `composite … blend: 'over'`.
+    const optimized = await sharp(buffer).png({ compressionLevel: 9 }).toBuffer();
+
+    const key = `mockups/${designId}/${productType}-design-overlay.png`;
+    const imageUrl = await this.uploadToR2(key, optimized, 'image/png');
+
+    await this.prisma.mockup.upsert({
+      where: {
+        designId_productType_variant: {
+          designId,
+          productType,
+          variant: 'design-overlay',
+        },
+      },
+      update: { imageUrl },
+      create: {
+        designId,
+        productType,
+        variant: 'design-overlay',
+        imageUrl,
+      },
+    });
+
+    this.logger.log(`Design overlay saved for design ${designId}`);
+    return imageUrl;
   }
 
   /**
@@ -366,95 +505,4 @@ export class MockupService {
     return imageUrl;
   }
 
-  /**
-   * Composite a design onto a blank product photo with visual improvements:
-   * - Auto-trim transparent padding from design
-   * - Drop shadow beneath design for depth
-   * - Multiply blend for fabric texture absorption
-   */
-  private async compositeDesignOnBlank(
-    designBuffer: Buffer,
-    blankUrl: string,
-    printConfig: { x: number; y: number; scale: number; rotation: number },
-    designMeta: sharp.Metadata,
-    _printAreaPx?: { widthPx: number; heightPx: number },
-  ): Promise<Buffer> {
-    const blankBuffer = await safeImageFetch(blankUrl);
-
-    const blankMeta = await sharp(blankBuffer).metadata();
-    const blankWidth = blankMeta.width || 1200;
-    const blankHeight = blankMeta.height || 1200;
-
-    // Auto-trim transparent padding so design fills its space
-    let trimmedDesign: Buffer;
-    try {
-      trimmedDesign = await sharp(designBuffer).trim().toBuffer();
-    } catch {
-      trimmedDesign = designBuffer;
-    }
-    const trimmedMeta = await sharp(trimmedDesign).metadata();
-
-    const printAreaOnBlank = blankWidth * 0.45;
-    const targetWidth = Math.round(printAreaOnBlank * Math.min(printConfig.scale || 0.6, 1));
-    const aspectRatio = (trimmedMeta.height || 1) / (trimmedMeta.width || 1);
-    const targetHeight = Math.round(targetWidth * aspectRatio);
-
-    const left = Math.round((blankWidth - targetWidth) / 2);
-    const top = Math.round(blankHeight * 0.25);
-
-    let resizedDesign = sharp(trimmedDesign).resize(targetWidth, targetHeight, {
-      fit: 'contain',
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
-    });
-
-    if (printConfig.rotation) {
-      resizedDesign = resizedDesign.rotate(printConfig.rotation, {
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      });
-    }
-
-    const designPng = await resizedDesign.png().toBuffer();
-
-    // Create drop shadow: black silhouette + blur + reduced opacity
-    const shadowPng = await sharp(designPng)
-      .ensureAlpha()
-      .composite([{
-        input: Buffer.from(
-          `<svg width="${targetWidth}" height="${targetHeight}">
-            <rect width="100%" height="100%" fill="black" opacity="0.25"/>
-          </svg>`,
-        ),
-        blend: 'in',
-      }])
-      .blur(8)
-      .toBuffer();
-
-    // Composite: blank → shadow (offset +4px down) → design (multiply at 20% + over at 80%)
-    const designMultiply = await sharp(designPng)
-      .ensureAlpha()
-      .linear(0.85, 0)
-      .toBuffer();
-
-    return sharp(blankBuffer)
-      .composite([
-        {
-          input: shadowPng,
-          left: Math.max(0, left),
-          top: Math.max(0, top + 4),
-          blend: 'over',
-        },
-        {
-          input: designMultiply,
-          left: Math.max(0, left),
-          top: Math.max(0, top),
-          blend: 'over',
-        },
-      ])
-      .jpeg({ quality: 90 })
-      .toBuffer();
-  }
-}
-
-function sanitizeColor(color: string): string {
-  return color.toLowerCase().replace(/[^a-z0-9]/g, '-');
 }

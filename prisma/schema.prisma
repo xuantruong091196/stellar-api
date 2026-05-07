@@ -56,6 +56,11 @@ enum GateAssetType {
   SOROBAN_SAC
 }
 
+enum RoyaltyScope {
+  DESIGN
+  MERCHANT_PRODUCT
+}
+
 enum PhysicalStatus {
   IN_PRODUCTION
   SHIPPED
@@ -212,6 +217,9 @@ model Order {
 
   isBurnOrder Boolean @default(false)
   burnNftId   String?
+
+  escrowVersion    Int   @default(1)
+  royaltySnapshot  Json?
 
   store          Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
   provider       Provider?       @relation(fields: [providerId], references: [id], onDelete: SetNull)
@@ -730,6 +738,23 @@ model ProductGating {
   updatedAt          DateTime        @updatedAt
 
   @@map("product_gating")
+}
+
+model RoyaltySplit {
+  id            String       @id @default(uuid())
+  scopeType     RoyaltyScope
+  scopeId       String
+  walletAddress String
+  percentBps    Int
+  role          String
+  label         String?
+  verified      Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([scopeType, scopeId, walletAddress])
+  @@index([scopeType, scopeId])
+  @@map("royalty_splits")
 }
 
 model BuyerWalletSession {

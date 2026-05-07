@@ -7,6 +7,7 @@ import { NftModule } from '../nft/nft.module';
 import { PackingSlipModule } from '../packing-slip/packing-slip.module';
 import { GatingModule } from '../gating/gating.module';
 import { ShopifyGraphqlModule } from '../shopify-graphql/shopify-graphql.module';
+import { RoyaltySplitsModule } from '../royalty-splits/royalty-splits.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ShopifyGraphqlModule } from '../shopify-graphql/shopify-graphql.module'
     PackingSlipModule,
     GatingModule,
     ShopifyGraphqlModule,
+    RoyaltySplitsModule,
   ],
   controllers: [OrdersController],
   providers: [OrdersService],

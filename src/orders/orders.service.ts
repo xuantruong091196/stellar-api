@@ -15,6 +15,7 @@ import { OrderStatus, EscrowStatus } from '../../generated/prisma';
 import { GatingService } from '../gating/gating.service';
 import { BalanceCheckerService } from '../gating/balance-checker.service';
 import { ShopifyGraphqlService } from '../shopify-graphql/shopify-graphql.service';
+import { SplitResolverService } from '../royalty-splits/split-resolver.service';
 
 /** Round a number to 2 decimal places for money math. */
 function round2(n: number): number {
@@ -63,6 +64,7 @@ export class OrdersService {
     private readonly gating: GatingService,
     private readonly balanceChecker: BalanceCheckerService,
     private readonly shopifyGraphql: ShopifyGraphqlService,
+    private readonly splitResolver: SplitResolverService,
   ) {}
 
   /**
@@ -148,6 +150,47 @@ export class OrdersService {
     const platformFee = round2(totalPrice * platformFeeRate);
     const providerPay = round2(totalPrice - platformFee);
 
+    // ── Task 16: Snapshot royalty splits at order creation (Plan B) ──────────
+    // Resolve splits for the first matched MerchantProduct and snapshot them
+    // onto the order row. If any splits are found, escrowVersion is set to 2
+    // so the escrow router (Task 15) can direct this order to escrow_v2 once
+    // Soroban submission is wired (Plan C). Until then, EscrowV2Service
+    // returns isAvailable()=false and the router falls back to v1 transparently
+    // — no existing order flow is broken.
+    const lineItemsForSnapshot =
+      (payload.line_items as Array<Record<string, unknown>>) || [];
+    const firstShopifyProductId = lineItemsForSnapshot
+      .map((item) => (item.product_id ? String(item.product_id) : null))
+      .find((id): id is string => id !== null);
+
+    let royaltySnapshot: object | null = null;
+    let escrowVersion = 1;
+
+    if (firstShopifyProductId) {
+      const mp = await this.prisma.merchantProduct.findFirst({
+        where: { storeId, shopifyProductId: firstShopifyProductId },
+      });
+      if (mp) {
+        try {
+          const splits = await this.splitResolver.resolve(mp.id);
+          if (splits.length > 0) {
+            escrowVersion = 2;
+            royaltySnapshot = splits;
+            this.logger.log(
+              `Order snapshot: ${splits.length} royalty split(s) found for product ${mp.id} — escrowVersion=2`,
+            );
+          }
+        } catch (err: any) {
+          // Non-fatal: split resolution failure must not block order creation.
+          // Log and fall back to v1 escrow.
+          this.logger.warn(
+            `Split resolution failed for product ${mp.id}: ${err.message}. Falling back to escrowVersion=1.`,
+          );
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Atomic: create order + outbox event in one transaction
     const order = await this.prisma.$transaction(async (tx) => {
       const created = await tx.order.create({
@@ -163,6 +206,10 @@ export class OrdersService {
           platformFeeUsdc: platformFee,
           providerPayUsdc: providerPay,
           totalUsdc: totalPrice,
+          escrowVersion,
+          // royaltySnapshot is a Json field — pass null when no splits found
+          // (undefined would skip the field and use the DB default of null).
+          royaltySnapshot: royaltySnapshot ?? undefined,
           items: {
             create: this.extractLineItems(payload),
           },

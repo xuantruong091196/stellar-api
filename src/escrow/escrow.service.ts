@@ -8,6 +8,7 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
+import { EscrowV2Service } from './escrow-v2.service';
 import { EscrowStatus } from '../../generated/prisma';
 import { ESCROW_MAX_LOCK_RETRIES } from '../common/constants';
 
@@ -18,6 +19,7 @@ export class EscrowService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
+    private readonly escrowV2: EscrowV2Service,
   ) {}
 
   /**
@@ -27,6 +29,12 @@ export class EscrowService {
    * Idempotent — skips any ProviderOrder that already has an escrow.
    * Does NOT build unsigned XDR (generated lazily when merchant opens the UI).
    * Emits an `escrow.action_required` outbox event so the merchant is notified.
+   *
+   * v1/v2 routing note: escrow records are always created here regardless of
+   * escrowVersion — the actual lock path (v1 XDR vs v2 Soroban) is chosen
+   * lazily when the merchant calls lockEscrow. If escrowVersion=2 but
+   * EscrowV2Service is unavailable (Soroban not yet wired), lockEscrow falls
+   * back to v1 transparently. See Task 15 routing comment in lockEscrow.
    */
   async autoInitEscrows(orderId: string): Promise<void> {
     const providerOrders = await this.prisma.providerOrder.findMany({
@@ -95,6 +103,13 @@ export class EscrowService {
    *
    * Idempotent: if the escrow already exists in LOCKING state (auto-created on
    * order arrival), skips DB creation and rebuilds the unsigned XDR.
+   *
+   * v1/v2 routing (Task 15):
+   * If the parent order has escrowVersion === 2 AND EscrowV2Service.isAvailable()
+   * returns true, this method delegates to v2 Soroban lock. Until Soroban
+   * submission is wired (Plan C), isAvailable() returns false and we fall
+   * through to the v1 XDR-signing path unchanged — existing orders are not
+   * affected.
    */
   async lockEscrow(
     providerOrderId: string,
@@ -103,7 +118,21 @@ export class EscrowService {
     // Idempotency: if auto-init already created the record, reuse it.
     const existing = await this.prisma.escrow.findUnique({
       where: { providerOrderId },
+      include: { order: true },
     });
+
+    // v1/v2 router: check escrowVersion on the parent order.
+    // If v2 is available (Soroban wired + contract configured), route to it.
+    // Otherwise fall through to v1 path (no change to existing behaviour).
+    if (existing?.order && existing.order.escrowVersion === 2 && this.escrowV2.isAvailable()) {
+      this.logger.log(
+        `lockEscrow: routing order ${existing.orderId} to escrow_v2 (Soroban)`,
+      );
+      // TODO Plan C follow-up: pass royaltySnapshot from order, build LockArgs,
+      // call this.escrowV2.lock(args) and return { escrowId: existing.id, txHash }.
+      // For now this branch is unreachable because isAvailable() returns false.
+    }
+
     if (existing) {
       if (existing.status !== EscrowStatus.LOCKING) {
         throw new BadRequestException(

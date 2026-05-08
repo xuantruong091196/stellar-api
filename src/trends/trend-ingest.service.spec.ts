@@ -6,6 +6,7 @@ import { TwitterAdapter } from './sources/twitter.adapter';
 import { TiktokAdapter } from './sources/tiktok.adapter';
 import { GoogleTrendsAdapter } from './sources/google-trends.adapter';
 import { PinterestAdapter } from './sources/pinterest.adapter';
+import { GoogleShoppingAdapter } from './sources/google-shopping.adapter';
 import { SellabilityScorer } from './scoring/sellability.scorer';
 import { CopyrightChecker } from './scoring/copyright.checker';
 import { CopyrightSerpApi } from './scoring/copyright.serpapi';
@@ -36,6 +37,7 @@ describe('TrendIngestService dedup query', () => {
         { provide: TiktokAdapter, useValue: stub('fetchForNiche') },
         { provide: GoogleTrendsAdapter, useValue: stub('fetchForNiche') },
         { provide: PinterestAdapter, useValue: stub('fetchStyleRefs') },
+        { provide: GoogleShoppingAdapter, useValue: stub('fetchForNiche') },
         { provide: SellabilityScorer, useValue: stub('score') },
         { provide: CopyrightChecker, useValue: { layerOne: jest.fn(), combineWithGemini: jest.fn() } },
         { provide: CopyrightSerpApi, useValue: stub('verify') },

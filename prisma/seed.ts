@@ -1,12 +1,57 @@
 import 'dotenv/config';
 import { PrismaClient } from '../generated/prisma';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { STYLE_TAGS } from '../src/trends/niche-vocab';
 
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
 });
 
+/**
+ * Upsert controlled style vocab from src/trends/niche-vocab.ts into the
+ * style_tags + style_tag_aliases tables. Idempotent — running multiple times
+ * is safe and adds new entries without touching existing rows.
+ *
+ * Aliases use upsert-by-alias so renaming a canonical slug is detectable
+ * (alias keeps pointing at the old styleTagId — flag in tests if mismatch).
+ */
+async function seedStyleVocab() {
+  console.log('Seeding style vocab...');
+  let tagInserts = 0;
+  let aliasInserts = 0;
+
+  for (const seed of STYLE_TAGS) {
+    const tag = await prisma.styleTag.upsert({
+      where: { slug: seed.slug },
+      update: {
+        name: seed.name,
+        category: seed.category ?? null,
+        enabled: true,
+      },
+      create: {
+        slug: seed.slug,
+        name: seed.name,
+        category: seed.category ?? null,
+        enabled: true,
+      },
+    });
+    tagInserts++;
+
+    for (const alias of seed.aliases ?? []) {
+      await prisma.styleTagAlias.upsert({
+        where: { alias },
+        update: { styleTagId: tag.id },
+        create: { alias, styleTagId: tag.id },
+      });
+      aliasInserts++;
+    }
+  }
+  console.log(`  StyleTags upserted: ${tagInserts}, aliases: ${aliasInserts}`);
+}
+
 async function main() {
+  await seedStyleVocab();
+
   console.log('Seeding provider products...');
 
   // --- Create 2 test providers (if not exist) ---

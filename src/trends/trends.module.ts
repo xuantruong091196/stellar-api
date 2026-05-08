@@ -13,6 +13,7 @@ import { TwitterAdapter } from './sources/twitter.adapter';
 import { TiktokAdapter } from './sources/tiktok.adapter';
 import { GoogleTrendsAdapter } from './sources/google-trends.adapter';
 import { PinterestAdapter } from './sources/pinterest.adapter';
+import { GoogleShoppingAdapter } from './sources/google-shopping.adapter';
 import { SellabilityScorer } from './scoring/sellability.scorer';
 import { CopyrightChecker } from './scoring/copyright.checker';
 import { CopyrightSerpApi } from './scoring/copyright.serpapi';
@@ -35,6 +36,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     TiktokAdapter,
     GoogleTrendsAdapter,
     PinterestAdapter,
+    GoogleShoppingAdapter,
     SellabilityScorer,
     CopyrightChecker,
     CopyrightSerpApi,

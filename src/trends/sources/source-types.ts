@@ -2,6 +2,11 @@ import { TrendSource } from '../../../generated/prisma';
 
 /**
  * Raw candidate fetched from a source — pre-scoring.
+ *
+ * Marketplace fields (`priceUsd`, `unitsSold`, `conversionRate`) are populated
+ * by `GOOGLE_SHOPPING` and `SHOPIFY_ADMIN_ORDERS` adapters only. Social-source
+ * adapters leave them undefined. The trend insight aggregation reads these to
+ * group items by price band and weight by internal conversion signal.
  */
 export interface TrendCandidate {
   source: TrendSource;
@@ -13,6 +18,10 @@ export interface TrendCandidate {
   language?: string;
   engagementCount?: number;
   growthVelocity?: number;
+  // Marketplace signal (USD-normalized at adapter ingest time)
+  priceUsd?: number;
+  unitsSold?: number;
+  conversionRate?: number;
   fetchedAt: Date;
   raw?: Record<string, unknown>;
 }

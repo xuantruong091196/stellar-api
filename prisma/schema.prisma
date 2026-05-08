@@ -729,6 +729,14 @@ model DesignProvenance {
   mintLedger        Int?
   burnTxHash        String?
   burnedAt          DateTime?
+  // Transfer-on-link: when a merchant uploads before linking their wallet, the
+  // mint goes to the issuer (`ownerWallet === issuerPublicKey`). After the
+  // merchant opens a trustline on their linked wallet, the reconcile cron
+  // moves the asset to them and records the tx hash here. A non-null value
+  // also serves as the atomic claim sentinel (`'PENDING'`) to prevent double
+  // submission across overlapping cron runs / multi-pod deploys.
+  transferTxHash    String?
+  transferredAt     DateTime?
 
   status            ProvenanceStatus @default(MINTING)
   errorMessage      String?

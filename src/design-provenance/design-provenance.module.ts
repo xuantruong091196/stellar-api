@@ -8,6 +8,7 @@ import { DesignProvenanceController } from './design-provenance.controller';
 import { ProvenanceMintQueue } from './provenance-mint.queue';
 import { ProvenanceMetadataService } from './provenance-metadata.service';
 import { ProvenanceMintProcessor } from './provenance-mint.processor';
+import { ProvenanceReconcileService } from './provenance-reconcile.service';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { ProvenanceMintProcessor } from './provenance-mint.processor';
     ProvenanceMetadataService,
     S3Service,
     ProvenanceMintProcessor,
+    ProvenanceReconcileService,
   ],
   controllers: [DesignProvenanceController],
   exports: [DesignProvenanceService, ProvenanceMetadataService],

@@ -1010,6 +1010,81 @@ export class StellarService implements OnModuleInit {
   }
 
   /**
+   * Transfer-on-link: move 1 stroop of a provenance asset from issuer to the
+   * merchant's linked wallet. Used by ProvenanceReconcileService when a
+   * merchant opens a trustline AFTER a mint that fell back to the issuer.
+   *
+   * Pre-flight checks are explicit so this method fails loudly rather than
+   * silently doing the wrong thing — the cron treats any throw as "skip
+   * this row, retry next tick". The destination must already have a
+   * trustline (the cron filter pre-checks this), and the issuer must still
+   * hold at least 1 stroop (otherwise this is a no-op state mismatch).
+   */
+  async transferProvenanceAsset(args: {
+    issuerSecret: string;
+    assetCode: string;
+    destinationWallet: string;
+  }): Promise<{ txHash: string; ledger: number }> {
+    const { issuerSecret, assetCode, destinationWallet } = args;
+    const issuerKp = StellarSdk.Keypair.fromSecret(issuerSecret);
+    this.logger.log(
+      `Transfer-on-link: asset=${assetCode}, issuer=${issuerKp.publicKey()}, dest=${destinationWallet}`,
+    );
+
+    return this.withStellarLock(async () => {
+      const asset = new StellarSdk.Asset(assetCode, issuerKp.publicKey());
+      const issuerAccount = await this.server.loadAccount(issuerKp.publicKey());
+
+      const issuerHolding = (issuerAccount.balances ?? []).some(
+        (b: any) =>
+          b.asset_code === assetCode &&
+          b.asset_issuer === issuerKp.publicKey() &&
+          parseFloat(b.balance) >= 0.0000001,
+      );
+      if (!issuerHolding) {
+        throw new Error(
+          `Issuer ${issuerKp.publicKey()} has no balance of ${assetCode} to transfer`,
+        );
+      }
+
+      const destAccount = await this.server.loadAccount(destinationWallet);
+      const hasTrustline = (destAccount.balances ?? []).some(
+        (b: any) =>
+          b.asset_code === assetCode &&
+          b.asset_issuer === issuerKp.publicKey(),
+      );
+      if (!hasTrustline) {
+        throw new Error(
+          `Trustline missing on ${destinationWallet} for ${assetCode}`,
+        );
+      }
+
+      const tx = new StellarSdk.TransactionBuilder(issuerAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          StellarSdk.Operation.payment({
+            destination: destinationWallet,
+            asset,
+            amount: '0.0000001',
+            source: issuerKp.publicKey(),
+          }),
+        )
+        .setTimeout(180)
+        .build();
+
+      tx.sign(issuerKp);
+      const result = await this.submitWithFeeBump(tx, issuerKp);
+
+      this.logger.log(
+        `Transfer-on-link complete: hash=${result.hash}, ledger=${result.ledger}`,
+      );
+      return { txHash: result.hash, ledger: result.ledger };
+    });
+  }
+
+  /**
    * Burn (clawback) a Design Provenance NFT asset from ownerWallet back to issuer.
    * Pre-flight: verifies AUTH_CLAWBACK_ENABLED is set on the issuer account.
    */

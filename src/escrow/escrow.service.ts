@@ -127,25 +127,27 @@ export class EscrowService {
     // isSorobanReady() flips to true, this guard prevents silent double-routing
     // (the v2 branch logging then v1 still building an XDR).
     //
-    // STATUS: EscrowV2Service.lock() is wired (Soroban submission helpers
-    // shipped 2026-05-08). Outstanding design decision is the signing flow:
-    // EscrowV2.lock takes a merchantSecret, but v1's lockEscrow returns an
-    // unsignedXdr for the merchant to sign client-side via Freighter — no
-    // server-side merchant key. Wiring this branch end-to-end requires
-    // either (a) introducing server-side custody for v2 merchants or
-    // (b) building an unsigned Soroban tx + auth-entry flow. Neither is
-    // a one-liner, so v2 orders still fail loudly at lock time until that
-    // design lands. EscrowV2Service.{release,refund,dispute,resolveDispute}
-    // CAN be called directly (system/arbiter signing, no merchant secret).
+    // STATUS: All building blocks are now wired —
+    //   - StellarService.buildUnsignedSorobanTx + submitSignedSorobanTx
+    //   - EscrowV2Service.lock/release/refund/dispute/resolveDispute
+    // What's still pending: a small integration layer that maps an
+    // existing v2 Escrow row → LockArgs (arbiter address from arbiter
+    // keypair config, usdc SAC contract id from a not-yet-added env var,
+    // beneficiaries from order.royaltySnapshot). That mapping needs a
+    // schema decision (where do we store usdcSacContractId per network?
+    // global config or per-order snapshot?) so I'm not landing a guess.
+    // V2 stays fail-closed at lock until that decision is made —
+    // FEATURE_ROYALTY_SPLITS_V2 ships at false and existing orders all
+    // route through v1 unchanged.
     if (
       existing?.order &&
       existing.order.escrowVersion === 2 &&
       this.escrowV2.isAvailable()
     ) {
       throw new BadRequestException(
-        `Order ${existing.orderId} is escrowVersion=2 but server-side merchant signing for v2 lock is not yet designed. ` +
-          `Soroban submission is wired; the lock flow needs unsigned-XDR + auth-entry support before this branch can route. ` +
-          `Flip FEATURE_ROYALTY_SPLITS_V2=false until that lands.`,
+        `Order ${existing.orderId} is escrowVersion=2 but the lockEscrow→EscrowV2 integration awaits a USDC SAC config decision. ` +
+          `EscrowV2Service is wired and exercisable directly. ` +
+          `Keep FEATURE_ROYALTY_SPLITS_V2=false until lockEscrow is updated.`,
       );
     }
 

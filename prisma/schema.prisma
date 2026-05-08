@@ -92,6 +92,15 @@ model Store {
   walletAddress  String?  @unique
   // Payout destination for escrow releases. Defaults to walletAddress on link; editable.
   stellarAddress String?
+  // Trend insights opt-in: when true, Shopify Admin Orders adapter reads this
+  // store's order data and contributes aggregated signals to TrendInsight.
+  // Set to true atomically during the Shopify re-auth flow that grants
+  // `read_orders` scope (see eng review decision #3).
+  shareOrderData Boolean  @default(false)
+  // Per-store feature flag overrides. Replaces global FEATURE_* env flags
+  // for cohort rollout (e.g. enable trend insights for 10 design-partner
+  // merchants before global). Generalizable for other features later.
+  featureFlags   Json     @default("{}")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -829,6 +838,8 @@ enum TrendSource {
   PINTEREST
   TIKTOK
   GOOGLE_TRENDS
+  GOOGLE_SHOPPING
+  SHOPIFY_ADMIN_ORDERS
 }
 
 enum TrendDesignStatus {
@@ -877,6 +888,11 @@ model TrendItem {
   engagementCount     Int?
   growthVelocity      Float?
   embedding           Unsupported("vector(768)")?
+  // Marketplace signal columns (populated by GOOGLE_SHOPPING + SHOPIFY_ADMIN_ORDERS adapters).
+  // Social-source adapters (twitter/tiktok/reddit/pinterest) leave these null.
+  priceUsd            Float?
+  unitsSold           Int?
+  conversionRate      Float?
   fetchedAt           DateTime                    @default(now())
   expiresAt           DateTime
   generatedDesigns    TrendDesign[]
@@ -1020,4 +1036,58 @@ model SecondaryRoyaltyPayment {
 model Cursor {
   name  String @id
   value String
+}
+
+// Controlled vocab for trend insight grouping. Populated by seed (see niche-vocab.ts).
+// Append-only policy: never delete/rename existing rows — historical TrendInsights
+// reference these slugs. Add new tags freely; merge synonyms via StyleTagAlias.
+model StyleTag {
+  id        String            @id @default(uuid())
+  slug      String            @unique
+  name      String
+  category  String?
+  enabled   Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  aliases   StyleTagAlias[]
+
+  @@map("style_tags")
+}
+
+// Synonym table for free-form style strings → controlled slug.
+// Examples: "minimal" / "minimalistic" / "minamilist" all alias to "minimalist".
+model StyleTagAlias {
+  id         String   @id @default(uuid())
+  alias      String   @unique
+  styleTagId String
+  styleTag   StyleTag @relation(fields: [styleTagId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@index([styleTagId])
+  @@map("style_tag_aliases")
+}
+
+// Aggregated cross-source trend signal. Each row represents one (niche × style ×
+// price band) cell within a 7-day rolling window. Computed by TrendInsightService
+// hourly cron; merchant dashboard reads ranked by score.
+//
+// `evidenceItemIds` is an array FK-by-value to TrendItem.id (no relation table —
+// TrendItems expire at 30 days, dangling references after that are acceptable).
+// GIN index supports the eval-harness `@>` array contains query.
+model TrendInsight {
+  id              String   @id @default(uuid())
+  niche           String
+  styleTag        String
+  priceBandLow    Float
+  priceBandHigh   Float
+  windowStart     DateTime
+  language        String   @default("en")
+  score           Float
+  sources         Json
+  evidenceItemIds String[]
+  computedAt      DateTime @default(now()) @updatedAt
+
+  @@unique([niche, styleTag, priceBandLow, priceBandHigh, windowStart, language])
+  @@index([niche, score, windowStart])
+  @@index([evidenceItemIds], type: Gin)
+  @@map("trend_insights")
 }

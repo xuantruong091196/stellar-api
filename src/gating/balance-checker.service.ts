@@ -61,8 +61,13 @@ export class BalanceCheckerService {
    * Query Soroban RPC for a SAC (Stellar Asset Contract) balance.
    * Calls the SAC `balance(addr)` view function via simulation.
    *
-   * NOTE: Soroban RPC is not yet wired up — deferred to Plan C Task 13.
-   * The method signature is required now so BalanceCheckerService compiles.
+   * SAC `balance` returns an `i128` of raw stroops (7-decimal fixed point —
+   * SACs always use 7 decimals because they wrap classic assets). The classic
+   * path (`checkClassic`) returns balances as pre-formatted decimal strings
+   * like "1.0000000" because that's what Horizon serves. We must match that
+   * shape here — otherwise `compare(observed, minBalance)` blows up: a wallet
+   * with 1 USDC (10_000_000 stroops) would falsely satisfy `minBalance: "1"`
+   * by orders of magnitude.
    */
   async checkSorobanSac(
     walletAddress: string,
@@ -75,8 +80,15 @@ export class BalanceCheckerService {
         StellarSdk.Address.fromString(walletAddress).toScVal(),
       );
       const result = await this.stellar.simulateContractCall(op);
-      const asString = StellarSdk.scValToNative(result.returnValue).toString();
-      return { balance: asString, ledger: result.latestLedger ?? 0 };
+      const stroopsBigInt = StellarSdk.scValToNative(
+        result.returnValue,
+      ) as bigint;
+      // Convert i128 stroops → "X.XXXXXXX" decimal. Big.js handles the
+      // BigInt-as-string fine and preserves precision.
+      const decimal = new Big(stroopsBigInt.toString())
+        .div('10000000')
+        .toFixed(7);
+      return { balance: decimal, ledger: result.latestLedger ?? 0 };
     });
   }
 

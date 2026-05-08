@@ -11,6 +11,17 @@ import {
 } from '../common/constants';
 
 /**
+ * Source pubkey for read-only Soroban simulations. Soroban RPC
+ * `simulateTransaction` does not validate sequence numbers or require the
+ * source to exist on-chain, so any well-formed G-pubkey works. We derive
+ * it from a zero seed so the value is deterministic and doesn't leak real
+ * account identifiers in RPC logs.
+ */
+const SIMULATION_SOURCE_PUBKEY = StellarSdk.Keypair.fromRawEd25519Seed(
+  Buffer.alloc(32),
+).publicKey();
+
+/**
  * Stellar service — manages escrow holding account, treasury, and tx submission.
  *
  * Architecture:
@@ -28,6 +39,7 @@ export class StellarService implements OnModuleInit {
   private readonly horizonUrl: string;
   private readonly networkPassphrase: string;
   readonly server: StellarSdk.Horizon.Server;
+  private sorobanServer: StellarSdk.rpc.Server | null = null;
   private readonly usdcIssuer: string;
 
   private redis: Redis | null = null;
@@ -93,6 +105,23 @@ export class StellarService implements OnModuleInit {
       } catch (e) {
         this.logger.warn(`Invalid SYSTEM_STELLAR_SECRET_KEY: ${(e as Error).message}`);
       }
+    }
+
+    // Initialize Soroban RPC client (read-only — no signing). Used by
+    // BalanceCheckerService.checkSorobanSac to query SAC balances via
+    // simulateTransaction. Local dev points at http://soroban-rpc:8000;
+    // testnet/mainnet at https://soroban-{testnet,mainnet}.stellar.org.
+    const sorobanRpcUrl = this.config.get<string>('stellar.sorobanRpcUrl');
+    if (sorobanRpcUrl) {
+      const allowHttp = sorobanRpcUrl.startsWith('http://');
+      this.sorobanServer = new StellarSdk.rpc.Server(sorobanRpcUrl, {
+        allowHttp,
+      });
+      this.logger.log(`Soroban RPC: ${sorobanRpcUrl}`);
+    } else {
+      this.logger.warn(
+        'STELLAR_SOROBAN_RPC_URL not configured — SAC gating will fail',
+      );
     }
 
     // Initialize Redis + Redlock
@@ -1103,16 +1132,48 @@ export class StellarService implements OnModuleInit {
   /**
    * Simulate a Soroban contract call (read-only view function).
    *
-   * STUB: Soroban RPC is not yet wired up project-wide. This method exists
-   * so BalanceCheckerService.checkSorobanSac compiles. Real implementation
-   * lands in Plan C Task 13 when SAC support is enabled end-to-end.
+   * Wraps the operation in a Transaction with a throwaway source account
+   * and submits to Soroban RPC `simulateTransaction`. Returns the raw
+   * `xdr.ScVal` retval — caller decodes via `scValToNative` for native types
+   * (i128 → BigInt → string for SAC `balance(addr)`).
+   *
+   * Source account note: simulation does not consume sequence numbers and
+   * does not require the source to exist on-chain. We use a constant
+   * G-prefixed address (`SIMULATION_SOURCE_PUBKEY`) so simulations are
+   * deterministic and don't leak real account identifiers.
    */
   async simulateContractCall(
-    _op: any,
-  ): Promise<{ returnValue: any; latestLedger?: number }> {
-    throw new Error(
-      'simulateContractCall not yet implemented — Soroban RPC config pending (Plan C Task 13)',
-    );
+    op: StellarSdk.xdr.Operation,
+  ): Promise<{ returnValue: StellarSdk.xdr.ScVal; latestLedger: number }> {
+    if (!this.sorobanServer) {
+      throw new Error(
+        'Soroban RPC not configured (set STELLAR_SOROBAN_RPC_URL)',
+      );
+    }
+
+    const source = new StellarSdk.Account(SIMULATION_SOURCE_PUBKEY, '0');
+    const tx = new StellarSdk.TransactionBuilder(source, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
+
+    const sim = await this.sorobanServer.simulateTransaction(tx);
+
+    if (StellarSdk.rpc.Api.isSimulationError(sim)) {
+      throw new Error(`Soroban simulation failed: ${sim.error}`);
+    }
+    if (!sim.result) {
+      throw new Error(
+        'Soroban simulation returned no result — operation is not a contract invocation',
+      );
+    }
+    return {
+      returnValue: sim.result.retval,
+      latestLedger: sim.latestLedger,
+    };
   }
 
   // ─── PRIVATE HELPERS ────────────────────────

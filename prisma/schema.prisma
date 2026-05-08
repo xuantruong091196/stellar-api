@@ -173,6 +173,7 @@ model Design {
   fileUrl         String
   thumbnailUrl    String?
   fileSha256      String
+  thumbnailSha256 String?
   fileSizeBytes   Int
   mimeType        String
   width           Int?

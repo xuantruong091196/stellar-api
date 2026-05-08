@@ -109,12 +109,20 @@ export class DesignsService {
     const s3Key = `designs/${storeId}/${fileSha256}/${safeName}`;
     const fileUrl = await this.s3.uploadFile(s3Key, file.buffer, file.mimetype);
 
-    // 3. Generate and upload thumbnail
+    // 3. Generate and upload thumbnail. Hash the resized buffer so SEP-0039
+    // `image_integrity` (in provenance NFT metadata) matches what readers
+    // actually fetch from thumbnailUrl — fileSha256 hashes the original,
+    // which is the wrong asset for thumbnail integrity verification.
     let thumbnailUrl: string | null = null;
+    let thumbnailSha256: string | null = null;
     try {
       const thumbnailBuffer = await sharp(file.buffer)
         .resize(300, 300, { fit: 'inside', withoutEnlargement: true })
         .toBuffer();
+      thumbnailSha256 = crypto
+        .createHash('sha256')
+        .update(thumbnailBuffer)
+        .digest('hex');
       const thumbnailKey = `designs/${storeId}/${fileSha256}/thumbnail.png`;
       thumbnailUrl = await this.s3.uploadFile(
         thumbnailKey,
@@ -140,6 +148,7 @@ export class DesignsService {
         fileUrl,
         thumbnailUrl,
         fileSha256,
+        thumbnailSha256,
         fileSizeBytes: file.size,
         mimeType: file.mimetype,
         width: probedWidth ?? metadata.width,

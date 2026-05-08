@@ -44,10 +44,11 @@ export class ProvenanceMintProcessor implements OnModuleInit {
       // 1. Asset code from sequence-assigned serial
       const assetCode = `STELOD${String(prov.serialNumber).padStart(4, '0')}`;
 
-      // 2. Build + upload SEP-0039 metadata to R2
-      // thumbnailSha256 doesn't exist on Design yet — cast to any and default to null.
-      // The metadata builder omits image_integrity when null (correct per SEP-0039).
-      const thumbnailHash = (prov.design as any).thumbnailSha256 ?? null;
+      // 2. Build + upload SEP-0039 metadata to R2.
+      // Older designs (uploaded before the thumbnailSha256 column existed) have
+      // null here; the metadata builder omits image_integrity when null, which
+      // is correct per SEP-0039 — readers fall back to fetch+verify the bytes.
+      const thumbnailHash = prov.design.thumbnailSha256 ?? null;
       const { json, hash } = this.meta.build({
         designId: prov.designId,
         designName: prov.design.name,

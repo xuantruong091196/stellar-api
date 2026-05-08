@@ -1237,6 +1237,90 @@ export class StellarService implements OnModuleInit {
   }
 
   /**
+   * Build an unsigned Soroban tx ready for client-side signing (Freighter etc).
+   * Simulates against the source account, assembles with footprint + auth, and
+   * returns the XDR. Caller submits the signed XDR via submitSignedSorobanTx.
+   */
+  async buildUnsignedSorobanTx(args: {
+    sourceAccount: StellarSdk.Account;
+    operation: StellarSdk.xdr.Operation;
+    timeoutSeconds?: number;
+  }): Promise<string> {
+    if (!this.sorobanServer) {
+      throw new Error('Soroban RPC not configured');
+    }
+    const { sourceAccount, operation, timeoutSeconds = 180 } = args;
+
+    let tx: StellarSdk.Transaction = new StellarSdk.TransactionBuilder(
+      sourceAccount,
+      {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      },
+    )
+      .addOperation(operation)
+      .setTimeout(timeoutSeconds)
+      .build();
+
+    const sim = await this.sorobanServer.simulateTransaction(tx);
+    if (StellarSdk.rpc.Api.isSimulationError(sim)) {
+      throw new Error(`Soroban simulation failed: ${sim.error}`);
+    }
+    tx = StellarSdk.rpc.assembleTransaction(tx, sim).build();
+    return tx.toXDR();
+  }
+
+  /**
+   * Submit a pre-signed Soroban tx XDR (signed client-side) and poll for
+   * confirmation. Mirrors the polling logic in submitSorobanInvocation but
+   * accepts an already-built+signed transaction so the caller doesn't need
+   * to expose any private keys to the server.
+   */
+  async submitSignedSorobanTx(
+    signedXdr: string,
+  ): Promise<{ txHash: string; ledger: number }> {
+    if (!this.sorobanServer) {
+      throw new Error('Soroban RPC not configured');
+    }
+    const tx = StellarSdk.TransactionBuilder.fromXDR(
+      signedXdr,
+      this.networkPassphrase,
+    );
+
+    const send = await this.sorobanServer.sendTransaction(tx);
+    if (send.status !== 'PENDING') {
+      throw new Error(
+        `Soroban sendTransaction returned ${send.status}: ${send.errorResult?.toXDR('base64') ?? 'no detail'}`,
+      );
+    }
+
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_POLLS = 30;
+    let result: StellarSdk.rpc.Api.GetTransactionResponse | null = null;
+    for (let i = 0; i < MAX_POLLS; i++) {
+      result = await this.sorobanServer.getTransaction(send.hash);
+      if (result.status !== StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    if (
+      !result ||
+      result.status === StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND
+    ) {
+      throw new Error(
+        `Soroban getTransaction timeout for ${send.hash} — reconcile via Horizon`,
+      );
+    }
+    if (result.status === StellarSdk.rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error(
+        `Soroban tx ${send.hash} FAILED on-chain: ${result.resultXdr?.toXDR('base64') ?? ''}`,
+      );
+    }
+    return { txHash: send.hash, ledger: result.ledger };
+  }
+
+  /**
    * Submit a Soroban invocation transaction: simulate → assemble → sign → send → poll.
    * Used for write paths (escrow_v2 lock/release/refund/dispute, NFT mint, etc.).
    *

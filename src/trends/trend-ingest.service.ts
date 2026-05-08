@@ -7,7 +7,7 @@ import { TwitterAdapter } from './sources/twitter.adapter';
 import { TiktokAdapter } from './sources/tiktok.adapter';
 import { GoogleTrendsAdapter } from './sources/google-trends.adapter';
 import { PinterestAdapter } from './sources/pinterest.adapter';
-import { GoogleShoppingAdapter } from './sources/google-shopping.adapter';
+import { EtsyBestsellersAdapter } from './sources/etsy-bestsellers.adapter';
 import { SellabilityScorer } from './scoring/sellability.scorer';
 import { CopyrightChecker } from './scoring/copyright.checker';
 import { CopyrightSerpApi } from './scoring/copyright.serpapi';
@@ -27,7 +27,7 @@ export class TrendIngestService {
     private readonly tiktok: TiktokAdapter,
     private readonly googleTrends: GoogleTrendsAdapter,
     private readonly pinterest: PinterestAdapter,
-    private readonly googleShopping: GoogleShoppingAdapter,
+    private readonly etsyBestsellers: EtsyBestsellersAdapter,
     private readonly scorer: SellabilityScorer,
     private readonly copyright: CopyrightChecker,
     private readonly serpapi: CopyrightSerpApi,
@@ -88,8 +88,8 @@ export class TrendIngestService {
       this.twitter.fetchForNiche(niche),
       this.tiktok.fetchForNiche(niche),
       ...(opts.lightweight ? [] : [this.googleTrends.fetchForNiche(niche)]),
-      // GoogleShopping is heavy (paid SerpAPI calls); skip in lightweight mode
-      ...(opts.lightweight ? [] : [this.googleShopping.fetchForNiche(niche)]),
+      // Etsy bestsellers is heavy (Playwright headless browser); skip in lightweight mode
+      ...(opts.lightweight ? [] : [this.etsyBestsellers.fetchForNiche(niche)]),
     ];
     const results = await Promise.allSettled(fetchers);
     for (const r of results) {

@@ -46,6 +46,7 @@
     "jsonwebtoken": "^9.0.3",
     "pdfkit": "^0.18.0",
     "pg": "^8.20.0",
+    "playwright": "^1.59.1",
     "qrcode": "^1.5.4",
     "react-email": "^5.2.10",
     "redlock": "^5.0.0-beta.2",

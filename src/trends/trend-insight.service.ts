@@ -535,7 +535,7 @@ const EXTERNAL_SOURCES = new Set<TrendSource>([
   TrendSource.REDDIT,
   TrendSource.PINTEREST,
   TrendSource.GOOGLE_TRENDS,
-  TrendSource.GOOGLE_SHOPPING,
+  TrendSource.ETSY_BESTSELLERS,
 ]);
 
 function sumEngagement(items: EnrichedItem[], sources: Set<TrendSource>): number {

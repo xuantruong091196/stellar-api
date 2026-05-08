@@ -838,8 +838,9 @@ enum TrendSource {
   PINTEREST
   TIKTOK
   GOOGLE_TRENDS
-  GOOGLE_SHOPPING
+  GOOGLE_SHOPPING // legacy from SerpAPI direction (replaced by ETSY_BESTSELLERS); keep enum value to avoid prod migration churn
   SHOPIFY_ADMIN_ORDERS
+  ETSY_BESTSELLERS
 }
 
 enum TrendDesignStatus {

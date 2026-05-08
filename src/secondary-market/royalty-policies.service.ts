@@ -80,6 +80,45 @@ export class RoyaltyPoliciesService {
     });
   }
 
+  /**
+   * Resolve the effective royalty policy for a fresh mint by precedence:
+   * MERCHANT_PRODUCT > DESIGN. If neither has an active policy, returns
+   * `{ splits: [], totalBps: 0 }` — the on-chain contract treats this as
+   * "no royalty" (per state.rs comment: empty splits + total_bps=0).
+   *
+   * Skips ownership check because this is a system-internal mint helper,
+   * not a user-facing API.
+   */
+  async resolveForMint(args: {
+    designId: string;
+    merchantProductId: string;
+  }): Promise<{
+    splits: Array<{ address: string; percentBps: number }>;
+    totalBps: number;
+  }> {
+    const candidates = [
+      { scopeType: PolicyScope.MERCHANT_PRODUCT, scopeId: args.merchantProductId },
+      { scopeType: PolicyScope.DESIGN, scopeId: args.designId },
+    ];
+    for (const c of candidates) {
+      const policy = await this.prisma.nftRoyaltyPolicy.findFirst({
+        where: {
+          scopeType: c.scopeType,
+          scopeId: c.scopeId,
+          OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: new Date() } }],
+        },
+        orderBy: { effectiveFrom: 'desc' },
+      });
+      if (policy) {
+        return {
+          splits: policy.splits as any,
+          totalBps: policy.totalRoyaltyBps,
+        };
+      }
+    }
+    return { splits: [], totalBps: 0 };
+  }
+
   /** For per-NFT_TOKEN policies, sync the policy on-chain via stelo_nft.set_royalty_policy */
   async syncOnChain(policyId: string): Promise<void> {
     const policy = await this.prisma.nftRoyaltyPolicy.findUniqueOrThrow({

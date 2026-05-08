@@ -166,6 +166,19 @@ export class StellarService implements OnModuleInit {
   }
 
   /**
+   * Direct access to the Soroban RPC client for advanced flows that need
+   * the simulation retval (e.g. reading a contract method's u32 return).
+   * Throws when not configured. Most callers should use simulateContractCall
+   * or submitSorobanInvocation instead.
+   */
+  getSorobanServer(): StellarSdk.rpc.Server {
+    if (!this.sorobanServer) {
+      throw new Error('Soroban RPC not configured');
+    }
+    return this.sorobanServer;
+  }
+
+  /**
    * Returns the system keypair (signs admin Soroban invocations like
    * permissionless refunds). Throws when not configured — caller decides
    * whether the absence is fatal.

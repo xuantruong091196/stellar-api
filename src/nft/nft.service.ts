@@ -77,24 +77,16 @@ export class NftService {
     }>;
   }) {
     // ── Soroban NFT mint path (Plan D Task 16) ──────────────────────────────
-    // Guard: flag must be on AND SteloNftService must be wired (isAvailable()).
-    // Both conditions are false by default, so this branch never triggers today.
-    // When Soroban helpers + audit are complete, flip features.sorobanNft=true
-    // AND implement the early-return body below.
+    // Gated by FEATURE_SOROBAN_NFT + SteloNftService.isAvailable. When both
+    // are true, route to the per-store stelo_nft contract; otherwise fall
+    // through to the classic-asset path below for backward compat with all
+    // existing NftToken rows (isClassicLegacy=true).
     const useSoroban =
       this.config.get<boolean>('features.sorobanNft') === true &&
       this.steloNft.isAvailable();
     if (useSoroban) {
-      // TODO Plan D follow-up: Soroban mint path
-      // - resolve royalty policy via this.policies for each item's
-      //   merchantProduct (designId / merchantProductId)
-      // - call this.steloNft.mint({ storeId, ownerWallet, metadataHash, royaltyPolicy })
-      // - persist NftToken with contractAddress + contractTokenId, isClassicLegacy=false
-      // - return early without running the classic asset mint below
-      this.logger.log(
-        'Soroban NFT mint path enabled but not implemented; falling back to classic',
-      );
-      // Fall through to classic until SteloNftService.mint is real.
+      await this.mintForOrderSoroban(order);
+      return;
     }
     // ────────────────────────────────────────────────────────────────────────
 
@@ -224,6 +216,186 @@ export class NftService {
           title: `NFT minting failed — ${assetCode}`,
           payload: { assetCode, error: (err as Error).message, orderId: order.id },
         }).catch((e) => this.logger.warn(`nft.mint_failed email failed: ${(e as Error).message}`));
+      }
+    }
+  }
+
+  /**
+   * Soroban mint path. One stelo_nft contract per store; tokens are u32 ids
+   * inside that contract (not standalone Stellar assets). NftToken.assetCode
+   * is left empty for Soroban tokens — `contractAddress + contractTokenId`
+   * is the on-chain identity.
+   *
+   * Idempotent per orderItem: skips items that already have an NftToken row.
+   */
+  private async mintForOrderSoroban(order: {
+    id: string;
+    storeId: string;
+    customerEmail: string;
+    items: Array<{
+      id: string;
+      merchantProductId: string;
+      merchantProduct: {
+        title: string;
+        designId: string;
+        maxSupply: number | null;
+        design: { fileUrl: string; mockups: Array<{ imageUrl: string }> };
+        providerProduct: { productType: string; provider: { name: string } };
+      };
+    }>;
+  }): Promise<void> {
+    const issuer = await this.findOrCreateStoreIssuer(order.storeId);
+    const wallet = await this.findOrCreateBuyerWallet(order.customerEmail);
+
+    for (const item of order.items) {
+      const existingNft = await this.prisma.nftToken.findUnique({
+        where: { orderItemId: item.id },
+      });
+      if (existingNft) continue;
+
+      const nft = await this.prisma.nftToken.create({
+        data: {
+          orderId: order.id,
+          orderItemId: item.id,
+          merchantProductId: item.merchantProductId,
+          designId: item.merchantProduct.designId,
+          storeId: order.storeId,
+          assetCode: '', // Soroban tokens identified by (contractAddress, tokenId)
+          issuerPublicKey: issuer.stellarPublicKey,
+          ownerWalletId: wallet.id,
+          metadataUrl: '',
+          metadataHash: '',
+          status: NftStatus.MINTING,
+          isClassicLegacy: false,
+        },
+      });
+
+      const mockupUrl =
+        item.merchantProduct.design.mockups?.[0]?.imageUrl ||
+        item.merchantProduct.design.fileUrl;
+      const meta = this.metadata.buildMetadata({
+        productTitle: item.merchantProduct.title,
+        designerName:
+          item.merchantProduct.providerProduct?.provider?.name || 'Stelo',
+        mockupUrl,
+        serialNumber: nft.serialNumber,
+        maxSupply: item.merchantProduct.maxSupply,
+        productType:
+          item.merchantProduct.providerProduct?.productType || 'product',
+        // For Soroban, assetCode + issuer are placeholder — the token's
+        // identity is (contractAddress, tokenId), captured below.
+        assetCode: `STELO-SRB-${nft.serialNumber}`,
+        issuerPublicKey: issuer.stellarPublicKey,
+        physicalStatus: null,
+      });
+      const metadataHash = this.metadata.hashMetadata(meta);
+      const metadataUrl = await this.metadata.uploadMetadata(
+        item.merchantProduct.designId,
+        `STELO-SRB-${nft.serialNumber}`,
+        meta,
+      );
+
+      await this.prisma.nftToken.update({
+        where: { id: nft.id },
+        data: { metadataUrl, metadataHash },
+      });
+
+      this.emailService
+        .send({
+          to: order.customerEmail,
+          type: 'nft.minting',
+          locale: 'en',
+          title: `NFT minting in progress — token #${nft.serialNumber}`,
+          payload: { serialNumber: nft.serialNumber, orderId: order.id },
+        })
+        .catch((err) =>
+          this.logger.warn(`nft.minting email failed: ${(err as Error).message}`),
+        );
+
+      try {
+        const royaltyPolicy = await this.policies.resolveForMint({
+          designId: item.merchantProduct.designId,
+          merchantProductId: item.merchantProductId,
+        });
+
+        const { contractAddress, tokenId, txHash } = await this.steloNft.mint({
+          storeId: order.storeId,
+          ownerWallet: wallet.stellarPublicKey,
+          metadataHash,
+          royaltyPolicy,
+        });
+
+        await this.prisma.nftToken.update({
+          where: { id: nft.id },
+          data: {
+            status: NftStatus.MINTED,
+            mintTxHash: txHash,
+            contractAddress,
+            contractTokenId: String(tokenId),
+          },
+        });
+
+        this.logger.log(
+          `Soroban NFT minted: contract=${contractAddress} tokenId=${tokenId} order=${order.id} (tx: ${txHash})`,
+        );
+
+        if (item.merchantProduct.maxSupply) {
+          const currentSupply = await this.prisma.nftToken.count({
+            where: {
+              merchantProductId: item.merchantProductId,
+              status: { not: NftStatus.MINT_FAILED },
+            },
+          });
+          if (currentSupply >= item.merchantProduct.maxSupply) {
+            this.logger.warn(
+              `SUPPLY LIMIT REACHED for product ${item.merchantProductId}: ${currentSupply}/${item.merchantProduct.maxSupply}`,
+            );
+          }
+        }
+
+        this.emailService
+          .send({
+            to: order.customerEmail,
+            type: 'nft.ready',
+            locale: 'en',
+            title: `Your NFT is ready — token #${tokenId}`,
+            payload: {
+              contractAddress,
+              tokenId,
+              mintTxHash: txHash,
+              nftId: nft.id,
+              orderId: order.id,
+            },
+          })
+          .catch((err) =>
+            this.logger.warn(`nft.ready email failed: ${(err as Error).message}`),
+          );
+      } catch (err) {
+        this.logger.error(
+          `Soroban NFT mint failed for ${nft.id}: ${(err as Error).message}`,
+        );
+        await this.prisma.nftToken.update({
+          where: { id: nft.id },
+          data: { status: NftStatus.MINT_FAILED },
+        });
+
+        this.emailService
+          .send({
+            to: order.customerEmail,
+            type: 'nft.mint_failed',
+            locale: 'en',
+            title: `NFT minting failed — token #${nft.serialNumber}`,
+            payload: {
+              serialNumber: nft.serialNumber,
+              error: (err as Error).message,
+              orderId: order.id,
+            },
+          })
+          .catch((e) =>
+            this.logger.warn(
+              `nft.mint_failed email failed: ${(e as Error).message}`,
+            ),
+          );
       }
     }
   }

@@ -8,6 +8,7 @@ import { TrendsService } from './trends.service';
 import { TrendIngestService } from './trend-ingest.service';
 import { TrendDesignService } from './trend-design.service';
 import { TrendDesignQueue } from './trend-design.queue';
+import { TrendInsightService } from './trend-insight.service';
 import { RedditAdapter } from './sources/reddit.adapter';
 import { TwitterAdapter } from './sources/twitter.adapter';
 import { TiktokAdapter } from './sources/tiktok.adapter';
@@ -31,6 +32,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     TrendIngestService,
     TrendDesignService,
     TrendDesignQueue,
+    TrendInsightService,
     RedditAdapter,
     TwitterAdapter,
     TiktokAdapter,

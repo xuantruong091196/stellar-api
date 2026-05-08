@@ -126,20 +126,26 @@ export class EscrowService {
     // and HARD-STOP — don't fall through to the v1 XDR build below. When
     // isSorobanReady() flips to true, this guard prevents silent double-routing
     // (the v2 branch logging then v1 still building an XDR).
+    //
+    // STATUS: EscrowV2Service.lock() is wired (Soroban submission helpers
+    // shipped 2026-05-08). Outstanding design decision is the signing flow:
+    // EscrowV2.lock takes a merchantSecret, but v1's lockEscrow returns an
+    // unsignedXdr for the merchant to sign client-side via Freighter — no
+    // server-side merchant key. Wiring this branch end-to-end requires
+    // either (a) introducing server-side custody for v2 merchants or
+    // (b) building an unsigned Soroban tx + auth-entry flow. Neither is
+    // a one-liner, so v2 orders still fail loudly at lock time until that
+    // design lands. EscrowV2Service.{release,refund,dispute,resolveDispute}
+    // CAN be called directly (system/arbiter signing, no merchant secret).
     if (
       existing?.order &&
       existing.order.escrowVersion === 2 &&
       this.escrowV2.isAvailable()
     ) {
-      // FIXME Plan B follow-up: load royaltySnapshot from existing.order, build
-      // LockArgs (amountStroops, platformFeeStroops, beneficiaries, expiresAt),
-      // call this.escrowV2.lock(args), persist tx hash, return XDR-equivalent.
-      // Until Soroban submission helpers ship, this throws — orders that flagged
-      // themselves as v2 at create-time but reach lock with v2 unavailable are a
-      // misconfiguration that should surface loudly, not silently degrade.
       throw new BadRequestException(
-        `Order ${existing.orderId} is escrowVersion=2 but escrow_v2 lock path is not yet implemented. ` +
-          `This indicates a configuration mismatch — flip FEATURE_ROYALTY_SPLITS_V2=false until Soroban submission lands.`,
+        `Order ${existing.orderId} is escrowVersion=2 but server-side merchant signing for v2 lock is not yet designed. ` +
+          `Soroban submission is wired; the lock flow needs unsigned-XDR + auth-entry support before this branch can route. ` +
+          `Flip FEATURE_ROYALTY_SPLITS_V2=false until that lands.`,
       );
     }
 

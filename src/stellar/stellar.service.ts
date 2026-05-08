@@ -160,6 +160,25 @@ export class StellarService implements OnModuleInit {
     return this.escrowKeypair?.publicKey() || null;
   }
 
+  /** Returns true when Soroban RPC is configured and the client is initialized. */
+  isSorobanReady(): boolean {
+    return this.sorobanServer !== null;
+  }
+
+  /**
+   * Returns the system keypair (signs admin Soroban invocations like
+   * permissionless refunds). Throws when not configured — caller decides
+   * whether the absence is fatal.
+   */
+  requireSystemKeypair(): StellarSdk.Keypair {
+    if (!this.systemKeypair) {
+      throw new Error(
+        'System keypair not configured (set SYSTEM_STELLAR_SECRET_KEY)',
+      );
+    }
+    return this.systemKeypair;
+  }
+
   /** Network passphrase used by this Stellar service (testnet or public). */
   getNetworkPassphrase(): string {
     return this.networkPassphrase;
@@ -1202,6 +1221,90 @@ export class StellarService implements OnModuleInit {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Submit a Soroban invocation transaction: simulate → assemble → sign → send → poll.
+   * Used for write paths (escrow_v2 lock/release/refund/dispute, NFT mint, etc.).
+   *
+   * Each Soroban tx must be wrapped in a TransactionBuilder built against the
+   * SOURCE account's CURRENT sequence number — caller passes the source account
+   * + signers and we handle the rest. All required signatures must be provided
+   * via `signers`; we sign all of them in order.
+   *
+   * Polling: getTransaction returns NOT_FOUND for a few ledger closes after
+   * sendTransaction returns PENDING. We poll every 2s up to 60s (≈12 ledgers).
+   * Past that, surfacing the timeout to the caller is correct — the tx may
+   * have landed but the caller should reconcile via Horizon if it's critical.
+   */
+  async submitSorobanInvocation(args: {
+    sourceAccount: StellarSdk.Account;
+    operation: StellarSdk.xdr.Operation;
+    signers: StellarSdk.Keypair[];
+    timeoutSeconds?: number;
+  }): Promise<{ txHash: string; ledger: number }> {
+    if (!this.sorobanServer) {
+      throw new Error(
+        'Soroban RPC not configured (set STELLAR_SOROBAN_RPC_URL)',
+      );
+    }
+    const { sourceAccount, operation, signers, timeoutSeconds = 180 } = args;
+
+    let tx: StellarSdk.Transaction = new StellarSdk.TransactionBuilder(
+      sourceAccount,
+      {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      },
+    )
+      .addOperation(operation)
+      .setTimeout(timeoutSeconds)
+      .build();
+
+    // Simulate to learn footprint, fees, and any required auth.
+    const sim = await this.sorobanServer.simulateTransaction(tx);
+    if (StellarSdk.rpc.Api.isSimulationError(sim)) {
+      throw new Error(`Soroban simulation failed: ${sim.error}`);
+    }
+
+    // Assemble adds the simulated SorobanData (footprint + resource fees) to
+    // the tx, returning a NEW builder we must sign.
+    tx = StellarSdk.rpc.assembleTransaction(tx, sim).build();
+    for (const kp of signers) {
+      tx.sign(kp);
+    }
+
+    const send = await this.sorobanServer.sendTransaction(tx);
+    if (send.status !== 'PENDING') {
+      throw new Error(
+        `Soroban sendTransaction returned ${send.status}: ${send.errorResult?.toXDR('base64') ?? 'no detail'}`,
+      );
+    }
+
+    // Poll: getTransaction returns NOT_FOUND until ledger close, then SUCCESS or FAILED.
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_POLLS = 30; // 60s
+    let result: StellarSdk.rpc.Api.GetTransactionResponse | null = null;
+    for (let i = 0; i < MAX_POLLS; i++) {
+      result = await this.sorobanServer.getTransaction(send.hash);
+      if (result.status !== StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+
+    if (!result || result.status === StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND) {
+      throw new Error(
+        `Soroban getTransaction timeout for ${send.hash} — tx may have landed; reconcile via Horizon`,
+      );
+    }
+    if (result.status === StellarSdk.rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error(
+        `Soroban tx ${send.hash} FAILED on-chain: ${result.resultXdr?.toXDR('base64') ?? 'no detail'}`,
+      );
+    }
+
+    return { txHash: send.hash, ledger: result.ledger };
   }
 
   /**

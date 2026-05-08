@@ -1,5 +1,4 @@
 import { Injectable, BadRequestException, Logger, Inject } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import IORedis from 'ioredis';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,46 +7,23 @@ import { StellarService } from '../stellar/stellar.service';
 const NONCE_TTL_SECONDS = 300;
 const SESSION_TTL_HOURS = 24;
 
+/**
+ * DI token for the Redis client wired into BuyerSiwsService. The module
+ * provides this via a ConfigService-driven factory; tests call the
+ * constructor directly with a mock that quacks like IORedis.
+ */
+export const BUYER_SIWS_REDIS = Symbol('BUYER_SIWS_REDIS');
+
 @Injectable()
 export class BuyerSiwsService {
   private readonly logger = new Logger(BuyerSiwsService.name);
-  private readonly redis: IORedis;
 
   constructor(
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
-    /**
-     * Accept either a live IORedis instance (passed by tests as a mock) or a
-     * ConfigService (injected by Nest DI in production from which we build a
-     * real IORedis). The duck-type check on `.set` lets unit tests bypass the
-     * full module graph. The explicit @Inject(ConfigService) is required
-     * because the union type `IORedis | ConfigService` confuses Nest's
-     * reflection-based DI — it sees `Object` and can't resolve the token.
-     */
-    @Inject(ConfigService)
-    redisOrConfig: IORedis | ConfigService,
-  ) {
-    if (redisOrConfig && typeof (redisOrConfig as any).set === 'function') {
-      // Test path: a mock IORedis was injected directly.
-      this.redis = redisOrConfig as IORedis;
-    } else {
-      // Production path: build a real IORedis from config.
-      const cfg = redisOrConfig as ConfigService;
-      const host = cfg.get<string>('redis.host') || 'localhost';
-      const port = cfg.get<number>('redis.port') || 6379;
-      const password = cfg.get<string>('redis.password') || undefined;
-      this.redis = new IORedis({
-        host,
-        port,
-        password,
-        maxRetriesPerRequest: null,
-        lazyConnect: true,
-      });
-      this.redis
-        .connect()
-        .catch((err) => this.logger.warn(`Redis connect: ${err.message}`));
-    }
-  }
+    @Inject(BUYER_SIWS_REDIS)
+    private readonly redis: IORedis,
+  ) {}
 
   /**
    * Issue a SIWS challenge nonce for the given buyer wallet address.

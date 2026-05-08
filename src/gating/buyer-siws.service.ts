@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import IORedis from 'ioredis';
 import { randomBytes } from 'crypto';
@@ -17,13 +17,14 @@ export class BuyerSiwsService {
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
     /**
-     * Accept either a live IORedis instance (injected by NestJS DI from
-     * ConfigService-based factory, or a mock in tests) or a ConfigService
-     * from which the connection details are read.
-     *
-     * The duck-type check on `.set` lets unit tests pass a plain mock object
-     * without wiring up the full NestJS module graph.
+     * Accept either a live IORedis instance (passed by tests as a mock) or a
+     * ConfigService (injected by Nest DI in production from which we build a
+     * real IORedis). The duck-type check on `.set` lets unit tests bypass the
+     * full module graph. The explicit @Inject(ConfigService) is required
+     * because the union type `IORedis | ConfigService` confuses Nest's
+     * reflection-based DI — it sees `Object` and can't resolve the token.
      */
+    @Inject(ConfigService)
     redisOrConfig: IORedis | ConfigService,
   ) {
     if (redisOrConfig && typeof (redisOrConfig as any).set === 'function') {

@@ -69,13 +69,35 @@ export class TrendDesignService implements OnModuleInit {
     const refs = (trendItem.styleRefs as Array<{ palette: string[]; styleTags: string[] }>) || [];
     const palette = refs.flatMap((r) => r.palette).slice(0, 3).join(', ');
     const tags = [...new Set(refs.flatMap((r) => r.styleTags))].slice(0, 4).join(', ');
-    const sanitizedKeyword = trendItem.keyword.replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ').slice(0, 200);
+    const sanitizedKeyword = this.sanitizeKeyword(trendItem.keyword);
     return `Create a typographic print-on-demand design for a ${productType}.
 Niche: ${trendItem.niche}.
 Quote/Keyword: "${sanitizedKeyword}".
 Style: ${tags || 'modern typography'}.
 Palette: ${palette || '#000000, #ffffff'}.
-Requirements: transparent PNG background, centered composition, typography is the hero, no logos or copyrighted characters, PORTRAIT aspect 5:6 (output dimensions approximately 832x1216), high contrast.`;
+Requirements: transparent PNG background, centered composition, typography is the hero, no logos or copyrighted characters, no hashtags or @mentions in the artwork, no URLs, PORTRAIT aspect 5:6 (output dimensions approximately 832x1216), high contrast.`;
+  }
+
+  /**
+   * Trend keywords come straight from tweet/TikTok caption text, so they
+   * leak `#hashtags`, `@mentions`, URLs, and RT/cc markers into the prompt
+   * — Gemini renders them as literal text on the print. Strip social-media
+   * meta-syntax so the AI works from the underlying phrase.
+   *
+   * Order matters: drop URLs first (they contain dots/slashes that would
+   * confuse later regexes), then mentions, then unwrap hashtags into their
+   * inner word (which is usually the actual subject of the trend).
+   */
+  private sanitizeKeyword(raw: string): string {
+    return raw
+      .replace(/[\r\n\t]/g, ' ')
+      .replace(/https?:\/\/\S+/gi, '')        // URLs
+      .replace(/\b(rt|cc)\b\s*@?\S*/gi, '')   // RT/cc social boilerplate
+      .replace(/@\w+/g, '')                   // @mentions
+      .replace(/#(\w+)/g, '$1')               // #hashtag → hashtag
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
   }
 
   private async processJob(trendDesignId: string) {

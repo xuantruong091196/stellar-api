@@ -128,17 +128,11 @@ export class ShopifyController {
           break;
 
         case 'products/update':
-          this.logger.log(
-            `Product updated for store ${store.shopifyDomain}: ${payload.id} — "${payload.title}"`,
-          );
-          // TODO: sync product title/price changes back to MerchantProduct
+          await this.handleProductUpdated(store.id, payload);
           break;
 
         case 'products/delete':
-          this.logger.log(
-            `Product deleted for store ${store.shopifyDomain}: ${payload.id}`,
-          );
-          // TODO: mark MerchantProduct as deleted when MerchantProduct model exists
+          await this.handleProductDeleted(store.id, payload);
           break;
 
         case 'app/uninstalled':
@@ -330,6 +324,88 @@ export class ShopifyController {
 
     this.logger.log(
       `Order ${order.id} refunded via webhook — ${refundable.length} escrow refund(s) kicked off`,
+    );
+  }
+
+  /**
+   * Sync title + description edits made by the merchant in Shopify Admin
+   * back to MerchantProduct so our dashboards / metafields don't drift.
+   * Price changes deliberately ignored — Shopify variant-level prices don't
+   * map cleanly to retailPrice (there can be many variants), and overwriting
+   * would break our profit-margin calculation. Merchants who want to repeg
+   * pricing should do so in our UI.
+   */
+  private async handleProductUpdated(
+    storeId: string,
+    payload: { id: number | string; title?: string; body_html?: string | null },
+  ): Promise<void> {
+    const shopifyProductId = String(payload.id);
+    const merchant = await this.prisma.merchantProduct.findFirst({
+      where: { storeId, shopifyProductId },
+      select: { id: true, title: true, description: true },
+    });
+    if (!merchant) {
+      this.logger.log(
+        `products/update for unknown shopifyProductId=${shopifyProductId} (not a Stelo product) — ignoring`,
+      );
+      return;
+    }
+
+    const data: { title?: string; description?: string | null } = {};
+    if (payload.title && payload.title !== merchant.title) {
+      data.title = payload.title;
+    }
+    // body_html nullable in Shopify — only update when present
+    if (
+      payload.body_html !== undefined &&
+      payload.body_html !== merchant.description
+    ) {
+      data.description = payload.body_html;
+    }
+
+    if (Object.keys(data).length === 0) {
+      this.logger.log(
+        `products/update no-op for ${merchant.id} — no tracked field changed`,
+      );
+      return;
+    }
+
+    await this.prisma.merchantProduct.update({
+      where: { id: merchant.id },
+      data,
+    });
+    this.logger.log(
+      `products/update synced ${merchant.id} (${Object.keys(data).join(', ')})`,
+    );
+  }
+
+  /**
+   * Shopify product deleted by merchant. Don't drop our row — they may want
+   * to re-publish later. Match the existing `unpublish()` flow: clear the
+   * Shopify IDs and revert to draft so the UI shows it as unpublished.
+   */
+  private async handleProductDeleted(
+    storeId: string,
+    payload: { id: number | string },
+  ): Promise<void> {
+    const shopifyProductId = String(payload.id);
+    const result = await this.prisma.merchantProduct.updateMany({
+      where: { storeId, shopifyProductId },
+      data: {
+        shopifyProductId: null,
+        shopifyProductGid: null,
+        status: 'draft',
+        publishedAt: null,
+      },
+    });
+    if (result.count === 0) {
+      this.logger.log(
+        `products/delete for unknown shopifyProductId=${shopifyProductId} — ignoring`,
+      );
+      return;
+    }
+    this.logger.log(
+      `products/delete reverted ${result.count} MerchantProduct(s) to draft (shopifyProductId=${shopifyProductId})`,
     );
   }
 }

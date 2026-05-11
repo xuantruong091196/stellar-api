@@ -473,6 +473,79 @@ export class TrendInsightService {
     };
   }
 
+  /**
+   * Read top-N insights for the current window, optionally filtered to a set
+   * of niches. Used by the dashboard widget + digest cron.
+   *
+   * Returns rows already ranked by score desc. If `niches` is empty, returns
+   * the global top-N across all niches (useful for an "Explore trends" view).
+   *
+   * Hydrates the top evidence item's keyword so the UI has a human-readable
+   * label without a second round-trip ("Minimalist Mama Tee" not just an ID).
+   */
+  async getInsights(opts: {
+    niches?: string[];
+    language?: string;
+    limit?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      niche: string;
+      styleTag: string;
+      priceBandLow: number;
+      priceBandHigh: number;
+      score: number;
+      sources: unknown;
+      topEvidenceKeyword: string | null;
+      evidenceItemIds: string[];
+      windowStart: Date;
+    }>
+  > {
+    const limit = Math.min(Math.max(opts.limit ?? 5, 1), 50);
+    const language = opts.language ?? 'en';
+    const windowStart = this.currentWindowStart(new Date());
+
+    const rows = await this.prisma.trendInsight.findMany({
+      where: {
+        windowStart,
+        language,
+        ...(opts.niches && opts.niches.length > 0
+          ? { niche: { in: opts.niches } }
+          : {}),
+      },
+      orderBy: { score: 'desc' },
+      take: limit,
+    });
+
+    // Hydrate top-evidence keyword for each insight (single batched query)
+    const topIds = rows
+      .map((r) => r.evidenceItemIds[0])
+      .filter((id): id is string => !!id);
+    const evidenceItems =
+      topIds.length > 0
+        ? await this.prisma.trendItem.findMany({
+            where: { id: { in: topIds } },
+            select: { id: true, keyword: true },
+          })
+        : [];
+    const keywordById = new Map(evidenceItems.map((e) => [e.id, e.keyword]));
+
+    return rows.map((r) => ({
+      id: r.id,
+      niche: r.niche,
+      styleTag: r.styleTag,
+      priceBandLow: r.priceBandLow,
+      priceBandHigh: r.priceBandHigh,
+      score: r.score,
+      sources: r.sources,
+      topEvidenceKeyword: r.evidenceItemIds[0]
+        ? keywordById.get(r.evidenceItemIds[0]) ?? null
+        : null,
+      evidenceItemIds: r.evidenceItemIds,
+      windowStart: r.windowStart,
+    }));
+  }
+
   /** Cached count of stores opted into shareOrderData. 1-minute TTL. */
   async getOptInCount(): Promise<number> {
     const now = Date.now();

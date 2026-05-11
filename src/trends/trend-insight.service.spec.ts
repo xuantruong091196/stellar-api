@@ -5,7 +5,7 @@ import { TrendInsightService } from './trend-insight.service';
 function makeService(opts: { rampThreshold?: number; optInCount?: number } = {}) {
   const prisma: any = {
     trendItem: { findMany: jest.fn() },
-    trendInsight: { upsert: jest.fn() },
+    trendInsight: { upsert: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
     store: { count: jest.fn().mockResolvedValue(opts.optInCount ?? 0) },
     $queryRawUnsafe: jest.fn().mockResolvedValue([]),
   };
@@ -277,6 +277,75 @@ describe('TrendInsightService dedup', () => {
     const { svc } = makeService();
     const out = await svc.dedupByEmbedding([]);
     expect(out).toEqual([]);
+  });
+});
+
+describe('TrendInsightService.getInsights', () => {
+  it('queries current window, given language, ranked by score desc', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([
+      { id: 'i1', niche: 'mama', styleTag: 'minimalist', priceBandLow: 20, priceBandHigh: 25, score: 88, sources: {}, evidenceItemIds: ['e1'], windowStart: new Date() },
+      { id: 'i2', niche: 'mama', styleTag: 'retro', priceBandLow: 25, priceBandHigh: 30, score: 71, sources: {}, evidenceItemIds: [], windowStart: new Date() },
+    ]);
+    prisma.trendItem.findMany.mockResolvedValue([{ id: 'e1', keyword: 'Minimalist Mama Tee' }]);
+
+    const out = await svc.getInsights({ niches: ['mama'], language: 'en', limit: 5 });
+    expect(out).toHaveLength(2);
+    // findMany called with windowStart + language + niche filter, ordered by score desc
+    const findManyArgs = prisma.trendInsight.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.language).toBe('en');
+    expect(findManyArgs.where.niche).toEqual({ in: ['mama'] });
+    expect(findManyArgs.orderBy).toEqual({ score: 'desc' });
+    expect(findManyArgs.take).toBe(5);
+    expect(findManyArgs.where.windowStart).toBeInstanceOf(Date);
+  });
+
+  it('hydrates topEvidenceKeyword from the first evidence item', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([
+      { id: 'i1', niche: 'mama', styleTag: 'minimalist', priceBandLow: 20, priceBandHigh: 25, score: 88, sources: {}, evidenceItemIds: ['e1', 'e2'], windowStart: new Date() },
+    ]);
+    prisma.trendItem.findMany.mockResolvedValue([{ id: 'e1', keyword: 'Minimalist Mama Tee' }]);
+
+    const out = await svc.getInsights({});
+    expect(out[0].topEvidenceKeyword).toBe('Minimalist Mama Tee');
+  });
+
+  it('topEvidenceKeyword is null when insight has no evidence', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([
+      { id: 'i1', niche: 'mama', styleTag: 'minimalist', priceBandLow: 20, priceBandHigh: 25, score: 88, sources: {}, evidenceItemIds: [], windowStart: new Date() },
+    ]);
+    const out = await svc.getInsights({});
+    expect(out[0].topEvidenceKeyword).toBeNull();
+    // No trendItem query needed when no evidence ids
+    expect(prisma.trendItem.findMany).not.toHaveBeenCalled();
+  });
+
+  it('omits niche filter when niches is empty/undefined (global explore view)', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([]);
+    await svc.getInsights({});
+    const where = prisma.trendInsight.findMany.mock.calls[0][0].where;
+    expect(where.niche).toBeUndefined();
+  });
+
+  it('clamps limit to [1, 50]', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([]);
+    await svc.getInsights({ limit: 1000 });
+    expect(prisma.trendInsight.findMany.mock.calls[0][0].take).toBe(50);
+    await svc.getInsights({ limit: 0 });
+    expect(prisma.trendInsight.findMany.mock.calls[1][0].take).toBe(1);
+  });
+
+  it('defaults language to "en" and limit to 5', async () => {
+    const { svc, prisma } = makeService();
+    prisma.trendInsight.findMany.mockResolvedValue([]);
+    await svc.getInsights({});
+    const args = prisma.trendInsight.findMany.mock.calls[0][0];
+    expect(args.where.language).toBe('en');
+    expect(args.take).toBe(5);
   });
 });
 

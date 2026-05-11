@@ -10,6 +10,7 @@ import { TrendDesignService } from './trend-design.service';
 import { TrendDesignQueue } from './trend-design.queue';
 import { TrendInsightService } from './trend-insight.service';
 import { DigestService } from './digest.service';
+import { EvalHarnessService } from './eval-harness.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RedditAdapter } from './sources/reddit.adapter';
 import { TwitterAdapter } from './sources/twitter.adapter';
@@ -36,6 +37,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     TrendDesignQueue,
     TrendInsightService,
     DigestService,
+    EvalHarnessService,
     RedditAdapter,
     TwitterAdapter,
     TiktokAdapter,

@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { TrendsService } from './trends.service';
 import { TrendInsightService } from './trend-insight.service';
+import { EvalHarnessService } from './eval-harness.service';
 import { BrowseTrendsDto } from './dto/browse-trends.dto';
 import { SubscriptionGuard } from '../subscription/subscription.guard';
 import { Public } from '../auth/decorators/public.decorator';
@@ -12,6 +13,7 @@ export class TrendsController {
   constructor(
     private readonly trends: TrendsService,
     private readonly insights: TrendInsightService,
+    private readonly evalHarness: EvalHarnessService,
   ) {}
 
   @Public()
@@ -56,6 +58,19 @@ export class TrendsController {
           : undefined,
     });
     return { data, count: data.length };
+  }
+
+  /**
+   * Latest eval-harness snapshot: how do designs generated from insights
+   * convert vs the control group? Drives the "is this feature working?"
+   * dashboard chart. Static segment, precedes `@Get(':id')`.
+   */
+  @Get('insights/eval')
+  @UseGuards(SubscriptionGuard)
+  @ApiOperation({ summary: 'Latest trend insight eval snapshot (conversion lift)' })
+  async getEvalSnapshot() {
+    const snapshot = await this.evalHarness.getLatest();
+    return { data: snapshot };
   }
 
   @Get()

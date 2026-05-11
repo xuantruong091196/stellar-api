@@ -1039,6 +1039,26 @@ model Cursor {
   value String
 }
 
+// Weekly snapshot from the trend insight eval harness. Compares conversion
+// (designs that resulted in ≥1 order) between insight-driven designs and a
+// control group of random-trend designs. Drives the "is this feature
+// working?" dashboard chart. Note: "conversion" here is a proxy —
+// designs-that-got-an-order / total-designs — since we don't track design
+// page views.
+model TrendInsightEvalSnapshot {
+  id                   String   @id @default(uuid())
+  snapshotAt           DateTime @default(now())
+  lookbackDays         Int
+  insightDrivenDesigns Int
+  insightDrivenOrders  Int
+  controlDesigns       Int
+  controlOrders        Int
+  conversionLift       Float? // insightConvRate / controlConvRate; null when control rate is 0
+
+  @@index([snapshotAt(sort: Desc)])
+  @@map("trend_insight_eval_snapshots")
+}
+
 // Controlled vocab for trend insight grouping. Populated by seed (see niche-vocab.ts).
 // Append-only policy: never delete/rename existing rows — historical TrendInsights
 // reference these slugs. Add new tags freely; merge synonyms via StyleTagAlias.

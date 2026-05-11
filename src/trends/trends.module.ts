@@ -9,6 +9,8 @@ import { TrendIngestService } from './trend-ingest.service';
 import { TrendDesignService } from './trend-design.service';
 import { TrendDesignQueue } from './trend-design.queue';
 import { TrendInsightService } from './trend-insight.service';
+import { DigestService } from './digest.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RedditAdapter } from './sources/reddit.adapter';
 import { TwitterAdapter } from './sources/twitter.adapter';
 import { TiktokAdapter } from './sources/tiktok.adapter';
@@ -25,7 +27,7 @@ import { TrendCleanupService } from './trend-cleanup.service';
 import { SubscriptionModule } from '../subscription/subscription.module';
 
 @Module({
-  imports: [PrismaModule, AiContentModule, SubscriptionModule],
+  imports: [PrismaModule, AiContentModule, SubscriptionModule, NotificationsModule],
   controllers: [TrendsController, TrendDesignController],
   providers: [
     TrendsService,
@@ -33,6 +35,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     TrendDesignService,
     TrendDesignQueue,
     TrendInsightService,
+    DigestService,
     RedditAdapter,
     TwitterAdapter,
     TiktokAdapter,

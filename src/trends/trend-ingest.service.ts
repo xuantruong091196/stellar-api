@@ -8,6 +8,7 @@ import { TiktokAdapter } from './sources/tiktok.adapter';
 import { GoogleTrendsAdapter } from './sources/google-trends.adapter';
 import { PinterestAdapter } from './sources/pinterest.adapter';
 import { EtsyBestsellersAdapter } from './sources/etsy-bestsellers.adapter';
+import { ShopifyOrdersAdapter } from './sources/shopify-orders.adapter';
 import { SellabilityScorer } from './scoring/sellability.scorer';
 import { CopyrightChecker } from './scoring/copyright.checker';
 import { CopyrightSerpApi } from './scoring/copyright.serpapi';
@@ -28,6 +29,7 @@ export class TrendIngestService {
     private readonly googleTrends: GoogleTrendsAdapter,
     private readonly pinterest: PinterestAdapter,
     private readonly etsyBestsellers: EtsyBestsellersAdapter,
+    private readonly shopifyOrders: ShopifyOrdersAdapter,
     private readonly scorer: SellabilityScorer,
     private readonly copyright: CopyrightChecker,
     private readonly serpapi: CopyrightSerpApi,
@@ -90,6 +92,8 @@ export class TrendIngestService {
       ...(opts.lightweight ? [] : [this.googleTrends.fetchForNiche(niche)]),
       // Etsy bestsellers is heavy (Playwright headless browser); skip in lightweight mode
       ...(opts.lightweight ? [] : [this.etsyBestsellers.fetchForNiche(niche)]),
+      // Shopify orders is a cheap local DB query — always run (it's the moat signal)
+      this.shopifyOrders.fetchForNiche(niche),
     ];
     const results = await Promise.allSettled(fetchers);
     for (const r of results) {

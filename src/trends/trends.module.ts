@@ -18,6 +18,7 @@ import { TiktokAdapter } from './sources/tiktok.adapter';
 import { GoogleTrendsAdapter } from './sources/google-trends.adapter';
 import { PinterestAdapter } from './sources/pinterest.adapter';
 import { EtsyBestsellersAdapter } from './sources/etsy-bestsellers.adapter';
+import { ShopifyOrdersAdapter } from './sources/shopify-orders.adapter';
 import { SellabilityScorer } from './scoring/sellability.scorer';
 import { CopyrightChecker } from './scoring/copyright.checker';
 import { CopyrightSerpApi } from './scoring/copyright.serpapi';
@@ -44,6 +45,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
     GoogleTrendsAdapter,
     PinterestAdapter,
     EtsyBestsellersAdapter,
+    ShopifyOrdersAdapter,
     SellabilityScorer,
     CopyrightChecker,
     CopyrightSerpApi,

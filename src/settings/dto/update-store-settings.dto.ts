@@ -120,4 +120,16 @@ export class UpdateStoreSettingsDto {
   @ValidateIf((_, v) => v !== null && v !== '')
   @Matches(/^G[A-Z2-7]{55}$/, { message: 'Must be a valid Stellar public key' })
   stellarAddress?: string | null;
+
+  /**
+   * Opt-in to contribute this store's anonymized order data to the trend
+   * insights internal signal (read by ShopifyOrdersAdapter). Lives on Store,
+   * not StoreSettings — the service extracts it before the settings upsert.
+   * When true, the adapter aggregates unitsSold/conversionRate by niche ×
+   * price band — customer PII (name/email/address) never persisted.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  shareOrderData?: boolean;
 }

@@ -20,6 +20,8 @@ interface UpdateStoreSettingsInput {
   inAppEnabled?: boolean;
   // Payout address (on Store model, not StoreSettings)
   stellarAddress?: string | null;
+  // Trend insights internal-signal opt-in (on Store model, not StoreSettings)
+  shareOrderData?: boolean;
 }
 
 interface UpdateProviderSettingsInput {
@@ -66,6 +68,7 @@ export class SettingsService {
       shopifyConnected: store != null && !!store.shopifyToken && !store.shopifyDomain.includes('.stelo.life'),
       walletAddress: store?.walletAddress ?? null,
       stellarAddress: store?.stellarAddress ?? null,
+      shareOrderData: store?.shareOrderData ?? false,
     };
   }
 
@@ -76,11 +79,11 @@ export class SettingsService {
   ) {
     if (storeId !== callerStoreId) throw new ForbiddenException();
 
-    const { stellarAddress, ...settingsInput } = input;
+    const { stellarAddress, shareOrderData, ...settingsInput } = input;
 
-    // Atomic: settings upsert + optional store payout update in one transaction.
-    // Without this, a failure between the two writes could leave stellarAddress
-    // updated but the rest of the settings unchanged (or vice-versa).
+    // Atomic: settings upsert + optional Store-level field updates in one
+    // transaction. Without this, a failure between the writes could leave
+    // Store fields updated but StoreSettings unchanged (or vice-versa).
     const settings = await this.prisma.$transaction(async (tx) => {
       const upserted = await tx.storeSettings.upsert({
         where: { storeId },
@@ -88,11 +91,13 @@ export class SettingsService {
         update: settingsInput,
       });
 
-      if (stellarAddress !== undefined) {
-        await tx.store.update({
-          where: { id: storeId },
-          data: { stellarAddress: stellarAddress ?? null },
-        });
+      // Coalesce Store-level field updates into one update call to avoid
+      // two round-trips when both are present
+      const storeData: Record<string, unknown> = {};
+      if (stellarAddress !== undefined) storeData.stellarAddress = stellarAddress ?? null;
+      if (shareOrderData !== undefined) storeData.shareOrderData = shareOrderData;
+      if (Object.keys(storeData).length > 0) {
+        await tx.store.update({ where: { id: storeId }, data: storeData });
       }
 
       return upserted;

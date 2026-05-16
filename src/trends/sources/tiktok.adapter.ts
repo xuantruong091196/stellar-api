@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TrendSource } from '../../../generated/prisma';
 import { fetchWithTimeout } from '../../common/safe-fetch';
-import { NicheConfig, TrendCandidate, TrendSourceAdapter } from './source-types';
+import { BaseTrendAdapter } from './base-trend-adapter';
+import { NicheConfig, TrendCandidate } from './source-types';
 
 /**
  * tiktok-scraper7 API uses a 2-step flow per hashtag:
@@ -35,13 +36,13 @@ interface TikTokPostsResponse {
 }
 
 @Injectable()
-export class TiktokAdapter implements TrendSourceAdapter {
+export class TiktokAdapter extends BaseTrendAdapter {
   readonly name = 'tiktok';
-  private readonly logger = new Logger(TiktokAdapter.name);
   private readonly apiKey: string | undefined;
   private readonly host: string;
 
   constructor(private readonly config: ConfigService) {
+    super();
     this.apiKey = this.config.get<string>('trends.rapidApiKey');
     this.host = this.config.get<string>('trends.rapidApiTiktokHost') || 'tiktok-scraper7.p.rapidapi.com';
     if (!this.apiKey) this.logger.warn('RapidAPI key missing — TikTok adapter disabled');
@@ -49,53 +50,54 @@ export class TiktokAdapter implements TrendSourceAdapter {
 
   async fetchForNiche(niche: NicheConfig): Promise<TrendCandidate[]> {
     if (!this.apiKey) return [];
-    const out: TrendCandidate[] = [];
+    const out = await this.collectFromInputs(
+      niche.tiktokHashtags,
+      (tag) => this.fetchForHashtag(tag, niche),
+      (tag) => `#${tag}`,
+    );
+    this.logNicheResult(niche, out.length);
+    return out;
+  }
 
-    for (const tag of niche.tiktokHashtags) {
-      try {
-        const challengeId = await this.fetchChallengeId(tag);
-        if (!challengeId) {
-          this.logger.warn(`TikTok #${tag}: challenge not found`);
-          continue;
-        }
-
-        const videos = await this.fetchVideos(challengeId, 20);
-        for (const v of videos) {
-          const playCount = v.play_count || 0;
-          if (playCount < 10_000) continue;
-
-          const sourceId = v.aweme_id || v.video_id;
-          if (!sourceId) continue;
-
-          const desc =
-            (Array.isArray(v.content_desc) ? v.content_desc.join(' ') : '') ||
-            v.title ||
-            '';
-
-          const engagement =
-            (v.digg_count || 0) +
-            (v.comment_count || 0) * 3 +
-            (v.share_count || 0) * 5;
-
-          out.push({
-            source: TrendSource.TIKTOK,
-            sourceId,
-            sourceUrl: `https://www.tiktok.com/@/video/${sourceId}`,
-            niche: niche.slug,
-            keyword: desc.slice(0, 200),
-            fullText: desc,
-            engagementCount: engagement,
-            growthVelocity: playCount / 24,
-            fetchedAt: new Date(),
-            raw: { hashtag: tag, challengeId, playCount },
-          });
-        }
-      } catch (err) {
-        this.logger.warn(`TikTok fetch #${tag} failed: ${(err as Error).message}`);
-      }
+  private async fetchForHashtag(tag: string, niche: NicheConfig): Promise<TrendCandidate[]> {
+    const challengeId = await this.fetchChallengeId(tag);
+    if (!challengeId) {
+      this.logger.warn(`TikTok #${tag}: challenge not found`);
+      return [];
     }
 
-    this.logger.log(`TikTok: ${out.length} candidates for niche ${niche.slug}`);
+    const videos = await this.fetchVideos(challengeId, 20);
+    const out: TrendCandidate[] = [];
+    for (const v of videos) {
+      const playCount = v.play_count || 0;
+      if (playCount < 10_000) continue;
+
+      const sourceId = v.aweme_id || v.video_id;
+      if (!sourceId) continue;
+
+      const desc =
+        (Array.isArray(v.content_desc) ? v.content_desc.join(' ') : '') ||
+        v.title ||
+        '';
+
+      const engagement =
+        (v.digg_count || 0) +
+        (v.comment_count || 0) * 3 +
+        (v.share_count || 0) * 5;
+
+      out.push({
+        source: TrendSource.TIKTOK,
+        sourceId,
+        sourceUrl: `https://www.tiktok.com/@/video/${sourceId}`,
+        niche: niche.slug,
+        keyword: desc.slice(0, 200),
+        fullText: desc,
+        engagementCount: engagement,
+        growthVelocity: playCount / 24,
+        fetchedAt: new Date(),
+        raw: { hashtag: tag, challengeId, playCount },
+      });
+    }
     return out;
   }
 

@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TrendSource } from '../../../generated/prisma';
 import { fetchWithTimeout } from '../../common/safe-fetch';
-import { NicheConfig, TrendCandidate, TrendSourceAdapter } from './source-types';
+import { BaseTrendAdapter } from './base-trend-adapter';
+import { NicheConfig, TrendCandidate } from './source-types';
 
 interface RedditPost {
   id: string;
@@ -35,53 +36,55 @@ interface RedditAboutResponse {
  *  - Read-only: cannot vote/comment/post (we don't need to)
  */
 @Injectable()
-export class RedditAdapter implements TrendSourceAdapter {
+export class RedditAdapter extends BaseTrendAdapter {
   readonly name = 'reddit';
-  private readonly logger = new Logger(RedditAdapter.name);
   private readonly userAgent: string;
   private readonly subBaselineCache = new Map<string, { median: number; subscribers: number; cachedAt: number }>();
 
   constructor(private readonly config: ConfigService) {
+    super();
     this.userAgent = this.config.get<string>('trends.redditUserAgent') || 'stelo-trend-bot/1.0';
   }
 
   async fetchForNiche(niche: NicheConfig): Promise<TrendCandidate[]> {
+    const out = await this.collectFromInputs(
+      niche.redditSubs,
+      (sub) => this.fetchForSub(sub, niche),
+      (sub) => `r/${sub}`,
+    );
+    this.logNicheResult(niche, out.length);
+    return out;
+  }
+
+  private async fetchForSub(sub: string, niche: NicheConfig): Promise<TrendCandidate[]> {
+    const baseline = await this.getSubBaseline(sub);
+    const posts = await this.fetchHot(sub, 50);
+
     const out: TrendCandidate[] = [];
+    for (const post of posts) {
+      const upvotes = post.ups;
+      const ageHours = Math.max(1, (Date.now() - post.created_utc * 1000) / 3_600_000);
+      const isTinyEarlySignal =
+        baseline.subscribers < 10_000 && upvotes > 50 && ageHours < 6;
+      const isStrongPost =
+        upvotes > baseline.median * 3 ||
+        upvotes / ageHours > baseline.subscribers * 0.0005;
 
-    for (const sub of niche.redditSubs) {
-      try {
-        const baseline = await this.getSubBaseline(sub);
-        const posts = await this.fetchHot(sub, 50);
+      if (!isTinyEarlySignal && !isStrongPost) continue;
 
-        for (const post of posts) {
-          const upvotes = post.ups;
-          const ageHours = Math.max(1, (Date.now() - post.created_utc * 1000) / 3_600_000);
-          const isTinyEarlySignal =
-            baseline.subscribers < 10_000 && upvotes > 50 && ageHours < 6;
-          const isStrongPost =
-            upvotes > baseline.median * 3 ||
-            upvotes / ageHours > baseline.subscribers * 0.0005;
-
-          if (!isTinyEarlySignal && !isStrongPost) continue;
-
-          out.push({
-            source: TrendSource.REDDIT,
-            sourceId: post.id,
-            sourceUrl: `https://reddit.com${post.permalink}`,
-            niche: niche.slug,
-            keyword: post.title,
-            fullText: (post.selftext || '').slice(0, 500),
-            engagementCount: upvotes + post.num_comments,
-            growthVelocity: upvotes / ageHours,
-            fetchedAt: new Date(),
-            raw: { sub, ageHours, baseline: baseline.median },
-          });
-        }
-      } catch (err) {
-        this.logger.warn(`Reddit fetch r/${sub} failed: ${(err as Error).message}`);
-      }
+      out.push({
+        source: TrendSource.REDDIT,
+        sourceId: post.id,
+        sourceUrl: `https://reddit.com${post.permalink}`,
+        niche: niche.slug,
+        keyword: post.title,
+        fullText: (post.selftext || '').slice(0, 500),
+        engagementCount: upvotes + post.num_comments,
+        growthVelocity: upvotes / ageHours,
+        fetchedAt: new Date(),
+        raw: { sub, ageHours, baseline: baseline.median },
+      });
     }
-    this.logger.log(`Reddit: ${out.length} candidates for niche ${niche.slug}`);
     return out;
   }
 
